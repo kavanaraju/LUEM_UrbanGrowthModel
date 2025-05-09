@@ -1,30 +1,388 @@
 ---
-title: "Assignment5"
-author: "Kavana Raju"
-date: "2025-04-23"
-output: html_document
+# CPLN 6750 – Phoenix Urban Growth Forecast, 2031
+
+title: "CPLN 6750 – Phoenix Urban Growth Forecast, 2031"
+author: "Sravya Dandamudi & <Kavana Raju"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    code_folding: show
+    code_download: true
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+# -----------------------------------
+# 0. SETUP
+# -----------------------------------
+# Set global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,           # Show code in output
+  warning = FALSE,       # Hide warnings
+  message = FALSE,       # Hide package messages
+  fig.width = 8,         # Default figure width
+  fig.height = 5         # Default figure height
+)
+
+# Load required libraries - install if missing
+required_pkgs <- c(
+  "tidyverse", "sf", "raster", "terra", "exactextractr",
+  "caret", "pROC", "kableExtra", "tidycensus", "tigris",
+  "mapedit", "FedData"
+)
+lapply(required_pkgs, function(pkg) {
+  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
+  library(pkg, character.only = TRUE)
+})
+
+# Placeholder: define CRS for Phoenix MSA (e.g., EPSG:26912 or 3857)
+crs_proj <- <INSERT_EPSG_CODE>  # e.g., 26912
+
+# Placeholder: grid resolution in map units (e.g., 300 for 300m)
+grid_res <- <INSERT_GRID_RESOLUTION>
+
+# Placeholder: path to your project data directory
+data_dir <- "<PATH/TO/your_project/data>"
 ```
 
-## R Markdown
+# 1. Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+Introduce the project:
+- Study region: Phoenix–Mesa–Scottsdale MSA
+- Forecast horizon: 2011→2021 model, project to 2031
+- Scenario: new infrastructure project (describe type and expected demand)
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+# 2. Study Area Boundary
 
-```{r cars}
-summary(cars)
+```{r load-boundary}
+# Load Phoenix MSA boundary via tigris or local shapefile
+# Option A: tigris
+# phx_msa <- tigris::cbsa(cb = TRUE) %>%
+#   filter(GEOID == "<PHX_CBSA_CODE>") %>%
+#   st_transform(crs_proj)
+
+# Option B: local file
+# phx_msa <- st_read(file.path(data_dir, "boundaries/phoenix_msa.geojson")) %>%
+#   st_transform(crs_proj)
 ```
 
-## Including Plots
+# 3. Data Sources & Paths
 
-You can also embed plots, for example:
+| Data Type                       | Source / Package        | File Path Placeholder                                  |
+|---------------------------------|-------------------------|--------------------------------------------------------|
+| NLCD Land Cover 2011            | MRLC / FedData          | `file.path(data_dir, "nlcd/nlcd_2011.tif")`          |
+| NLCD Land Cover 2021            | MRLC / FedData          | `file.path(data_dir, "nlcd/nlcd_2021.tif")`          |
+| TIGER Roads 2011                | tigris                  | N/A (download in code)                                 |
+| TIGER Roads 2021                | tigris                  | N/A (download in code)                                 |
+| Proposed 2031 Infra (shapefile) | ArcGIS / mapedit       | `file.path(data_dir, "infra/proposed_2031.shp")`     |
+| Census Tracts (2010, 2020)      | tigris                  | N/A (download in code)                                 |
+| ACS Variables (2011, 2021)      | tidycensus              | N/A (API call)                                         |
+| DEM (elevation)                 | USGS National Map       | `file.path(data_dir, "dem/DEM_phoenix.tif")`         |
+| FEMA Flood Zones                | FEMA NFHL / local file  | `file.path(data_dir, "flood/fema_flood.shp")`        |
+| PAD-US Protected Areas          | PAD-US download         | `file.path(data_dir, "padus/padus_az.shp")`          |
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+# 4. Load and Process Land Cover
+
+```{r landcover-load}
+# Placeholder: load NLCD rasters
+lc1_path <- file.path(data_dir, "nlcd/nlcd_2011.tif")
+lc2_path <- file.path(data_dir, "nlcd/nlcd_2021.tif")
+
+lc_2011 <- raster(lc1_path)
+lc_2021 <- raster(lc2_path)
+
+# Check projections
+stopifnot(crs(lc_2011) == crs(lc_2021))
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+```{r landcover-process}
+# OPTIONAL: resample to coarser resolution for performance
+# lc_2011_rs <- aggregate(lc_2011, fact=round(grid_res/30), fun="modal")
+# lc_2021_rs <- aggregate(lc_2021, fact=round(grid_res/30), fun="modal")
+# OTHERWISE, use raw rasters
+lc_2011_rs <- lc_2011
+lc_2021_rs <- lc_2021
+
+# Reclassify: developed (NLCD codes 21–24) vs undeveloped (others)
+reclass_mat <- matrix(c(
+  0,12,0,
+  12,24,1,
+  24,Inf,0
+), ncol=3, byrow=TRUE)
+
+dev_2011 <- reclassify(lc_2011_rs, reclass_mat)
+dev_2021 <- reclassify(lc_2021_rs, reclass_mat)
+
+# Compute change raster: 1 = undeveloped→developed
+change_rast <- dev_2011 + dev_2021
+change_rast[change_rast != 1] <- NA
+```
+
+# 5. Create Fishnet Grid
+
+```{r fishnet-create}
+# Determine cell size from raster resolution
+cell_size <- grid_res  # assume raster has 30m cells, grid_res in meters
+
+# Build fishnet over MSA boundary
+fishnet <- st_make_grid(
+  phx_msa %>% st_transform(crs(lc_2011_rs)),
+  cellsize = cell_size,
+  square = TRUE
+) %>% st_sf()
+
+# Clip fishnet to study area
+fishnet <- st_intersection(fishnet, phx_msa)
+fishnet$cell_id <- seq_len(nrow(fishnet))
+```
+
+# 6. Join Land Cover Change to Fishnet
+
+```{r join-change}
+# Convert change raster to points for aggregation
+change_pts <-
+  rasterToPoints(change_rast) %>%
+  as.data.frame() %>%
+  st_as_sf(coords = c("x","y"), crs = st_crs(fishnet))
+
+# Sum points per cell to flag change
+fishnet <- aggregate(
+  change_pts,
+  fishnet,
+  FUN = function(x) ifelse(sum(x, na.rm=TRUE) > 0, 1, 0)
+) %>%
+  mutate(development_change = as.factor(ifelse(layer == 1, 1, 0))) %>%
+  select(-layer)
+```
+
+# 7. Feature Engineering
+
+## 7.1 Distance to Roads
+```{r roads-distance}
+# Load roads for 2021 (also use for 2011 if similar)
+roads <- tigris::roads(state = "AZ", county = c(<INSERT_COUNTY_NAMES>)) %>%
+  st_transform(st_crs(fishnet)) %>%
+  summarize(geometry = st_union(geometry))
+
+# Compute distance from each cell centroid to nearest road
+fishnet <- fishnet %>%
+  st_centroid() %>%
+  mutate(
+    dist_roads = as.numeric(st_distance(., roads))
+  )
+```
+
+## 7.2 Proposed 2031 Infrastructure
+```{r new-infra-distance}
+# Load or digitize new infra (e.g., new_line)
+# Option A: load shapefile
+new_infra <- st_read(file.path(data_dir, "infra/proposed_2031.shp")) %>%
+  st_transform(st_crs(fishnet))
+
+# Option B: interactively digitize
+# new_infra <- mapedit::editMap(map = leaflet() %>% addTiles())$finished
+
+# Distance to new infraishnet <- fishnet %>%
+  mutate(
+    dist_newinfra = as.numeric(st_distance(., new_infra))
+  )
+```
+
+## 7.3 Census & Socioeconomic Variables
+```{r census-vars}
+# Placeholder: set your Census API key
+census_api_key("<YOUR_CENSUS_API_KEY>", install = TRUE)
+
+# Variables to fetch: population & median income
+acs_vars <- c(
+  pop = "B01003_001E",
+  income = "B19013_001E",
+  housing = "B25001_001E"
+)
+
+# Define tracts to download (Maricopa, Pinal)
+counties <- c("Maricopa", "Pinal")
+
+# Download 2011 ACS
+pop11 <- tidycensus::get_acs(
+  geography = "tract",
+  variables = acs_vars,
+  year = 2011,
+  state = "AZ",
+  county = counties,
+  geometry = TRUE,
+  output = "wide"
+) %>% st_transform(st_crs(fishnet))
+
+# Download 2021 ACS
+pop21 <- tidycensus::get_acs(
+  geography = "tract",
+  variables = acs_vars,
+  year = 2021,
+  state = "AZ",
+  county = counties,
+  geometry = TRUE,
+  output = "wide"
+) %>% st_transform(st_crs(fishnet))
+
+# Areal-weighted interpolation onto fishnet
+fishnet <- fishnet %>%
+  st_interpolate_aw(pop11[c("popE", "incomeE", "housingE")], extensive = TRUE) %>%
+  rename(pop_2011 = popE,
+         income_2011 = incomeE,
+         housing_2011 = housingE)
+
+fishnet <- fishnet %>%
+  st_interpolate_aw(pop21[c("popE", "incomeE", "housingE")], extensive = TRUE) %>%
+  rename(pop_2021 = popE,
+         income_2021 = incomeE,
+         housing_2021 = housingE)
+```
+
+## 7.4 Environmental & Sensitive Lands (Assessment Only)
+```{r env-layers}
+# Load DEM and compute slope (optional predictor)
+# dem <- raster(file.path(data_dir, "dem/DEM_phoenix.tif"))
+# slope <- terrain(dem, opt = "slope", unit = "degrees")
+# fishnet$slope <- exact_extract(slope, fishnet, 'mean')
+
+# Load flood zones and protected areas for overlay later
+flood_zones <- st_read(file.path(data_dir, "flood/fema_flood.shp")) %>% st_transform(st_crs(fishnet))
+protected <- st_read(file.path(data_dir, "padus/padus_az.shp")) %>% st_transform(st_crs(fishnet))
+```
+
+# 8. Compile Model Data Sets
+
+```{r compile-data}
+# Select relevant columns for t1 model
+model_data_t1 <- fishnet %>%
+  st_drop_geometry() %>%
+  select(
+    development_change,
+    dist_roads,
+    dist_newinfra,
+    pop_2011,
+    income_2011,
+    housing_2011,
+    # slope,
+    cell_id
+  ) %>%
+  na.omit()
+
+# Prepare t2 inputs for forecasting (same variables, 2021 values)
+model_data_t2 <- fishnet %>%
+  st_drop_geometry() %>%
+  select(
+    dist_roads,
+    dist_newinfra,
+    pop_2021,
+    income_2021,
+    housing_2021,
+    cell_id
+  ) %>%
+  na.omit()
+```
+
+# 9. Exploratory Data Analysis
+
+```{r eda}
+# Example: distribution of dist_roads by development_change
+ggplot(model_data_t1, aes(x = development_change, y = dist_roads)) +
+  geom_boxplot() +
+  labs(title = "Distance to Roads by Development Change")
+```
+
+# 10. Model Training (2011 → 2021)
+
+```{r train-model}
+set.seed(2025)
+train_idx <- createDataPartition(model_data_t1$development_change, p = 0.7, list = FALSE)
+train <- model_data_t1[train_idx,]
+test  <- model_data_t1[-train_idx,]
+
+# Fit logistic regression
+logit_model <- glm(
+  development_change ~ dist_roads + dist_newinfra + pop_2011 + income_2011 + housing_2011,
+  data = train,
+  family = binomial(link = "logit")
+)
+summary(logit_model)
+```
+
+# 11. Model Validation & Threshold Selection
+
+```{r validate-model}
+# Predict probabilities on test set
+test$prob <- predict(logit_model, test, type = "response")
+
+# ROC and AUC
+roc_obj <- roc(test$development_change, test$prob)
+auc(roc_obj)
+plot(roc_obj, main = "ROC Curve")
+
+# Choose threshold (e.g., 0.1)
+thresh <- 0.1
+
+test$pred_class <- factor(ifelse(test$prob >= thresh, 1, 0))
+confusionMatrix(test$pred_class, test$development_change, positive = "1")
+```
+
+# 12. Forecasting for 2031
+
+```{r forecast-2031}
+# Apply model to t2 inputs
+forecast_df <- model_data_t2 %>%
+  mutate(
+    prob_2031 = predict(logit_model, newdata = ., type = "response"),
+    predict_2031 = factor(ifelse(prob_2031 >= thresh, 1, 0))
+  )
+
+# Join back to spatial for mapping
+forecast_sf <- fishnet %>%
+  right_join(forecast_df, by = "cell_id")
+
+# Map forecasted development
+library(ggplot2)
+ggplot(forecast_sf) +
+  geom_sf(aes(fill = predict_2031), color = NA) +
+  labs(title = "Predicted Development in 2031", fill = "Develop?") +
+  theme_minimal()
+```
+
+# 13. Impact Assessment on Sensitive Lands
+
+```{r impact-assessment}
+# Overlap forecast with flood zones
+flood_overlap <- st_intersects(forecast_sf, flood_zones, sparse = FALSE)
+forecast_sf$flood_risk <- as.logical(rowSums(flood_overlap))
+
+# Overlap forecast with protected areas
+prot_overlap <- st_intersects(forecast_sf, protected, sparse = FALSE)
+forecast_sf$protected_risk <- as.logical(rowSums(prot_overlap))
+
+# Summarize risk metrics
+dashboard <- forecast_sf %>%
+  st_drop_geometry() %>%
+  filter(predict_2031 == 1) %>%
+  summarize(
+    pct_in_flood = mean(flood_risk) * 100,
+    pct_in_protected = mean(protected_risk) * 100,
+    total_cells = n()
+  )
+
+kable(dashboard)
+```
+
+# 14. Recommendations
+
+1. **Protect Flood-Prone Areas:** Based on the forecast, ~`r round(dashboard$pct_in_flood,1)`% of projected growth falls within 100-year flood zones; strengthen floodplain zoning.
+2. **Conserve Critical Habitats:** ~`r round(dashboard$pct_in_protected,1)`% overlaps protected lands; establish buffer zones.
+3. **Promote Infill Near New Transit:** Focus density incentives within 0.5 mi of the proposed 2031 corridor (dist_newinfra < <INSERT_BUFFER_DIST>) to curb leapfrog sprawl.
+
+# Appendix
+- Full regression output (`summary(logit_model)`)
+- Confusion matrix and ROC curve
+- Data dictionary of variables and units
