@@ -111,13 +111,29 @@ lc_2021 <- projectRaster(lc_2021, crs = 26912)
 print(extent(lc_2011))
 print(extent(lc_2021))
 ```
+```{r}
+writeRaster(
+  x         = lc_2011,
+  filename  = "data/LC_2011_PhoenixMSA",
+  filetype  = "GTiff",
+  overwrite = TRUE)
+
+writeRaster(
+  x         = lc_2021,
+  filename  = "data/LC_2021_PhoenixMSA",
+  filetype  = "GTiff",
+  overwrite = TRUE)
+```
 
 # 5. Detecting Land Cover Conversion
 
 ```{r detect-change}
-# Resample to 300m (factor=10)
+# Resample to 300m (To capture finer details as we're analyzing the extension - TOD)
 lc1_rs <- aggregate(lc_2011, fact=10, fun="modal")
 lc2_rs <- aggregate(lc_2021, fact=10, fun="modal")
+
+# Align origins, resolution, and extent
+lc2_rs <- resample(lc2_rs, lc1_rs, method="ngb")
 
 # Reclassify to binary developed
 rc <- matrix(c(0,12,0, 12,24,1, 24,Inf,0), ncol=3, byrow=TRUE)
@@ -182,7 +198,7 @@ fishnet_lc2 <- aggregateRaster(rasters2, fishnet)
 
 ```{r census}
 # Enter your key
-census_api_key("<YOUR_KEY>", install=FALSE)
+census_api_key("52f0462d8b4e1e19ee64b25a3196677c5e32e660", install=FALSE)
 
 # Variables
 vars <- c(pop="B01003_001E", income="B19013_001E", housing="B25001_001E")
@@ -204,16 +220,13 @@ names(fishnet_pop21) <- c("pop21","inc21","house21")
 # 10. Transportation & Infrastructure Features
 
 ```{r transport}
-# Highways
-hwys <- primary_secondary_roads(state="AZ") %>% st_transform(st_crs(fishnet)) %>%
-  st_union()
-# Distance to highways at t1 and t2 (assumed same)
-centroids <- st_centroid(fishnet)
-fishnet$dist_hwy <- as.numeric(st_distance(centroids, hwys))
+# Load existing light rail network
+existing_lr <- st_read("data/LightRail_Existing/LightRail_Existing.shp") %>%
+  st_transform(st_crs(fishnet))
 
-# Proposed new corridor
+# Proposed extension
 # new_corr <- mapedit::editMap(mapview(centroids))$finished
-new_corr <- st_read("data/infra/proposed_corridor_2031.shp") %>% st_transform(st_crs(fishnet))
+new_corr <- st_read("data/LightRail_Extension/LightRail_Extension.shp") %>% st_transform(st_crs(fishnet))
 fishnet$dist_new <- as.numeric(st_distance(centroids, new_corr))
 ```
 
