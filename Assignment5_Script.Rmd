@@ -1,381 +1,302 @@
 ---
 # CPLN 6750 – Phoenix Urban Growth Forecast, 2031
 
-title: "CPLN 6750 – Phoenix Urban Growth Forecast, 2031"
-author: "Sravya Dandamudi & <Kavana Raju"
-date: "`r Sys.Date()`"
-output:
-  html_document:
-    toc: true
-    toc_float: true
-    theme: flatly
-    highlight: tango
-    code_folding: show
-    code_download: true
+**Authors:** Sravya Dandamudi & Kavana Raju
+**Date:** ** 5/10/2025
+
 ---
 
 ```{r setup, include=FALSE}
+# -----------------------------------
+# 0. SETUP
+# -----------------------------------
 knitr::opts_chunk$set(
-  echo = TRUE,           # Show code in output
-  warning = FALSE,       # Hide warnings
-  message = FALSE,       # Hide package messages
-  fig.width = 8,         # Default figure width
-  fig.height = 5         # Default figure height
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 8,
+  fig.height = 5
 )
-
-required_pkgs <- c(
-  "tidyverse", "sf", "raster", "terra", "exactextractr",
-  "caret", "pROC", "kableExtra", "tidycensus", "tigris",
-  "mapedit", "FedData"
+# Load packages
+pkgs <- c(
+  "tidyverse","sf","raster","terra","exactextractr",
+  "tidycensus","tigris","FNN","caret","yardstick","plotROC",
+  "kableExtra","mapview","FedData"
 )
-lapply(required_pkgs, function(pkg) {
-  if (!requireNamespace(pkg, quietly = TRUE)) install.packages(pkg)
-  library(pkg, character.only = TRUE)
-})
+lapply(pkgs, function(p) if(!requireNamespace(p,quietly=TRUE)) install.packages(p))
+lapply(pkgs, library, character.only=TRUE)
 
-# Define CRS
-crs_proj <- 26812  # e.g., 26912
-
-# Placeholder: grid resolution in map units (e.g., 300 for 300m)
-grid_res <- 300
-
+# Custom helper functions (from example)
+quintileBreaks <- function(df, variable) {
+  as.character(quantile(df[[variable]], c(.01,.2,.4,.6,.8), na.rm=TRUE))
+}
+xyC <- function(aPolygonSF) {
+  as.data.frame(cbind(
+    x=st_coordinates(st_centroid(aPolygonSF))[,1],
+    y=st_coordinates(st_centroid(aPolygonSF))[,2]
+  ))
+}
+rast <- function(inRaster) {
+  df <- data.frame(xyFromCell(inRaster, 1:ncell(inRaster)),
+                   value=getValues(inRaster))
+  colnames(df) <- c('x','y','value')
+  df
+}
+nn_function <- function(measureFrom, measureTo, k) {
+  mf <- as.matrix(measureFrom)
+  mt <- as.matrix(measureTo)
+  dists <- get.knnx(mt, mf, k)$nn.dist
+  rowMeans(dists)
+}
+aggregateRaster <- function(rasterList, fishnet) {
+  result <- fishnet %>% select()
+  for(r in rasterList) {
+    nm <- names(r)
+    pts <- rasterToPoints(r) %>% as.data.frame() %>%
+      st_as_sf(coords=c('x','y'), crs=st_crs(fishnet)) %>%
+      filter(get(nm)==1)
+    agg <- aggregate(pts, fishnet, length) %>%
+      mutate(!!nm := ifelse(is.na(layer), 0, 1)) %>% select(-layer)
+    result <- cbind(result, agg)
+  }
+  result
+}
 ```
 
 # 1. Introduction
 
-Introduce the project:
-- Study region: Phoenix–Mesa–Scottsdale MSA
-- Forecast horizon: 2011→2021 model, project to 2031
-- Scenario: new infrastructure project (describe type and expected demand)
+This report builds a spatial logistic regression model of urban development in the Phoenix–Mesa–Scottsdale MSA, using land cover change from 2011 to 2021 as training data. We then forecast development to 2031 under a scenario where a new transportation corridor is introduced. Finally, we assess where sensitive lands (flood zones, protected areas) are at risk and propose planning recommendations.
 
-# 2. Study Area Boundary
+# 2. Workflow Overview
+
+1. Import and preprocess land cover rasters (2011, 2021)  
+2. Reclassify to developed/undeveloped and derive change raster  
+3. Build a fishnet grid and aggregate raster and vector features to each cell  
+4. Engineer predictors: distance to roads, spatial lag, census variables, slope  
+5. Train logistic regression model (2011→2021) and validate  
+6. Forecast to 2031 using 2021 inputs + new infrastructure scenario  
+7. Assess impacts on sensitive lands  
+8. Provide three key recommendations
+
+# 3. Study Area Boundary
 
 ```{r load-boundary}
-# Load Phoenix MSA boundary via tigris or local shapefile
-# Option A: tigris
-# phx_msa <- tigris::cbsa(cb = TRUE) %>%
-#   filter(GEOID == "<PHX_CBSA_CODE>") %>%
-#   st_transform(crs_proj)
-
-# Option B: local file
-# phx_msa <- st_read(file.path(data_dir, "boundaries/phoenix_msa.geojson")) %>%
-#   st_transform(crs_proj)
+# Load Boundary for Phoem
+phx_msa <- st_read("data/boundaries/phoenix_msa.geojson", quiet=TRUE) %>%
+  st_transform(26912)  # NAD83 / Arizona Central
 ```
 
-# 3. Data Sources & Paths
+# 4. Load Land Cover Data (NLCD)
 
-| Data Type                       | Source / Package        | File Path Placeholder                                  |
-|---------------------------------|-------------------------|--------------------------------------------------------|
-| NLCD Land Cover 2011            | MRLC / FedData          | `file.path(data_dir, "nlcd/nlcd_2011.tif")`          |
-| NLCD Land Cover 2021            | MRLC / FedData          | `file.path(data_dir, "nlcd/nlcd_2021.tif")`          |
-| TIGER Roads 2011                | tigris                  | N/A (download in code)                                 |
-| TIGER Roads 2021                | tigris                  | N/A (download in code)                                 |
-| Proposed 2031 Infra (shapefile) | ArcGIS / mapedit       | `file.path(data_dir, "infra/proposed_2031.shp")`     |
-| Census Tracts (2010, 2020)      | tigris                  | N/A (download in code)                                 |
-| ACS Variables (2011, 2021)      | tidycensus              | N/A (API call)                                         |
-| DEM (elevation)                 | USGS National Map       | `file.path(data_dir, "dem/DEM_phoenix.tif")`         |
-| FEMA Flood Zones                | FEMA NFHL / local file  | `file.path(data_dir, "flood/fema_flood.shp")`        |
-| PAD-US Protected Areas          | PAD-US download         | `file.path(data_dir, "padus/padus_az.shp")`          |
-
-# 4. Load and Process Land Cover
-
-```{r landcover-load}
-# Placeholder: load NLCD rasters
-lc1_path <- file.path(data_dir, "nlcd/nlcd_2011.tif")
-lc2_path <- file.path(data_dir, "nlcd/nlcd_2021.tif")
-
-lc_2011 <- raster(lc1_path)
-lc_2021 <- raster(lc2_path)
-
-# Check projections
-stopifnot(crs(lc_2011) == crs(lc_2021))
+```{r load-nlcd}
+# Fetch NLCD via FedData
+lc_2011 <- get_nlcd(template=phx_msa, label="lc_2011", year=2011) %>% raster()
+lc_2021 <- get_nlcd(template=phx_msa, label="lc_2021", year=2021) %>% raster()
 ```
 
-```{r landcover-process}
-# OPTIONAL: resample to coarser resolution for performance
-# lc_2011_rs <- aggregate(lc_2011, fact=round(grid_res/30), fun="modal")
-# lc_2021_rs <- aggregate(lc_2021, fact=round(grid_res/30), fun="modal")
-# OTHERWISE, use raw rasters
-lc_2011_rs <- lc_2011
-lc_2021_rs <- lc_2021
+# 5. Detecting Land Cover Conversion
 
-# Reclassify: developed (NLCD codes 21–24) vs undeveloped (others)
-reclass_mat <- matrix(c(
-  0,12,0,
-  12,24,1,
-  24,Inf,0
-), ncol=3, byrow=TRUE)
+```{r detect-change}
+# Resample to 300m (factor=10)
+lc1_rs <- aggregate(lc_2011, fact=10, fun="modal")
+lc2_rs <- aggregate(lc_2021, fact=10, fun="modal")
 
-dev_2011 <- reclassify(lc_2011_rs, reclass_mat)
-dev_2021 <- reclassify(lc_2021_rs, reclass_mat)
+# Reclassify to binary developed
+rc <- matrix(c(0,12,0, 12,24,1, 24,Inf,0), ncol=3, byrow=TRUE)
+dev1 <- reclassify(lc1_rs, rc)
+dev2 <- reclassify(lc2_rs, rc)
 
-# Compute change raster: 1 = undeveloped→developed
-change_rast <- dev_2011 + dev_2021
-change_rast[change_rast != 1] <- NA
+# Map algebra: 1 = change from undeveloped to developed
+dev_change <- dev1 + dev2
+dev_change[dev_change != 1] <- NA
 ```
 
-# 5. Create Fishnet Grid
+# 6. Creating the Fishnet Grid
 
-```{r fishnet-create}
-# Determine cell size from raster resolution
-cell_size <- grid_res  # assume raster has 30m cells, grid_res in meters
-
-# Build fishnet over MSA boundary
-fishnet <- st_make_grid(
-  phx_msa %>% st_transform(crs(lc_2011_rs)),
-  cellsize = cell_size,
-  square = TRUE
-) %>% st_sf()
-
-# Clip fishnet to study area
-fishnet <- st_intersection(fishnet, phx_msa)
-fishnet$cell_id <- seq_len(nrow(fishnet))
+```{r fishnet}
+grid_res <- res(lc1_rs)[1]
+fishnet <- st_make_grid(phx_msa, cellsize=grid_res, square=TRUE) %>%
+  st_sf() %>% st_intersection(phx_msa) %>%
+  mutate(cell_id = row_number())
 ```
 
-# 6. Join Land Cover Change to Fishnet
+# 7. Join Raster Change to Fishnet
 
 ```{r join-change}
-# Convert change raster to points for aggregation
-change_pts <-
-  rasterToPoints(change_rast) %>%
-  as.data.frame() %>%
-  st_as_sf(coords = c("x","y"), crs = st_crs(fishnet))
-
-# Sum points per cell to flag change
-fishnet <- aggregate(
-  change_pts,
-  fishnet,
-  FUN = function(x) ifelse(sum(x, na.rm=TRUE) > 0, 1, 0)
-) %>%
-  mutate(development_change = as.factor(ifelse(layer == 1, 1, 0))) %>%
+pts_change <- rasterToPoints(dev_change) %>% as.data.frame() %>%
+  st_as_sf(coords=c('x','y'), crs=st_crs(fishnet))
+fishnet <- aggregate(pts_change, fishnet, FUN=sum) %>%
+  mutate(development_change = factor(ifelse(layer>0,1,0))) %>%
   select(-layer)
 ```
 
-# 7. Feature Engineering
+# 8. Aggregating Land Cover Categories
 
-## 7.1 Distance to Roads
-```{r roads-distance}
-# Load roads for 2021 (also use for 2011 if similar)
-roads <- tigris::roads(state = "AZ", county = c(<INSERT_COUNTY_NAMES>)) %>%
-  st_transform(st_crs(fishnet)) %>%
-  summarize(geometry = st_union(geometry))
+```{r lc-categories}
+# Reclassify full NLCD into categories
+lc1_rs %>% names() # check
+# Example: Developed, Forest, Farm, Wetlands, Other, Water
+dev_2011 <- lc1_rs %in% c(21:24);
+forest_2011 <- lc1_rs %in% c(41:43);
+farm_2011 <- lc1_rs %in% c(81:82);
+wet_2011 <- lc1_rs %in% c(90,95);
+oth_2011 <- lc1_rs %in% c(52,71,31);
+water_2011 <- lc1_rs == 11
 
-# Compute distance from each cell centroid to nearest road
-fishnet <- fishnet %>%
-  st_centroid() %>%
-  mutate(
-    dist_roads = as.numeric(st_distance(., roads))
-  )
+# Name and aggregate
+names_list1 <- c("dev1","forest1","farm1","wet1","oth1","water1")
+rasters1 <- setNames(list(dev_2011, forest_2011, farm_2011, wet_2011, oth_2011, water_2011), names_list1)
+fishnet_lc1 <- aggregateRaster(rasters1, fishnet)
+
+# Repeat for 2021
+dev_2021 <- lc2_rs %in% c(21:24);
+forest_2021 <- lc2_rs %in% c(41:43);
+farm_2021 <- lc2_rs %in% c(81:82);
+wet_2021 <- lc2_rs %in% c(90,95);
+oth_2021 <- lc2_rs %in% c(52,71,31);
+water_2021 <- lc2_rs == 11
+rasters2 <- setNames(list(dev_2021, forest_2021, farm_2021, wet_2021, oth_2021, water_2021),
+                     c("dev2","forest2","farm2","wet2","oth2","water2"))
+fishnet_lc2 <- aggregateRaster(rasters2, fishnet)
 ```
 
-## 7.2 Proposed 2031 Infrastructure
-```{r new-infra-distance}
-# Load or digitize new infra (e.g., new_line)
-# Option A: load shapefile
-new_infra <- st_read(file.path(data_dir, "infra/proposed_2031.shp")) %>%
-  st_transform(st_crs(fishnet))
+# 9. Population & Socioeconomic Data via tidycensus
 
-# Option B: interactively digitize
-# new_infra <- mapedit::editMap(map = leaflet() %>% addTiles())$finished
+```{r census}
+# Enter your key
+census_api_key("<YOUR_KEY>", install=FALSE)
 
-# Distance to new infraishnet <- fishnet %>%
-  mutate(
-    dist_newinfra = as.numeric(st_distance(., new_infra))
-  )
+# Variables
+vars <- c(pop="B01003_001E", income="B19013_001E", housing="B25001_001E")
+
+# Download 2011 and 2021 at tract level, for Maricopa & Pinal
+counties <- c("Maricopa","Pinal")
+acs11 <- get_acs("tract", vars, year=2011, state="AZ", county=counties,
+                 geometry=TRUE, output="wide") %>% st_transform(st_crs(fishnet))
+acs21 <- get_acs("tract", vars, year=2021, state="AZ", county=counties,
+                 geometry=TRUE, output="wide") %>% st_transform(st_crs(fishnet))
+
+# Areal weighted interpolation
+fishnet_pop11 <- st_interpolate_aw(acs11[c("popE","incomeE","housingE")], fishnet)
+names(fishnet_pop11) <- c("pop11","inc11","house11")
+fishnet_pop21 <- st_interpolate_aw(acs21[c("popE","incomeE","housingE")], fishnet)
+names(fishnet_pop21) <- c("pop21","inc21","house21")
 ```
 
-## 7.3 Census & Socioeconomic Variables
-```{r census-vars}
-# Placeholder: set your Census API key
-census_api_key("<YOUR_CENSUS_API_KEY>", install = TRUE)
+# 10. Transportation & Infrastructure Features
 
-# Variables to fetch: population & median income
-acs_vars <- c(
-  pop = "B01003_001E",
-  income = "B19013_001E",
-  housing = "B25001_001E"
-)
+```{r transport}
+# Highways
+hwys <- primary_secondary_roads(state="AZ") %>% st_transform(st_crs(fishnet)) %>%
+  st_union()
+# Distance to highways at t1 and t2 (assumed same)
+centroids <- st_centroid(fishnet)
+fishnet$dist_hwy <- as.numeric(st_distance(centroids, hwys))
 
-# Define tracts to download (Maricopa, Pinal)
-counties <- c("Maricopa", "Pinal")
-
-# Download 2011 ACS
-pop11 <- tidycensus::get_acs(
-  geography = "tract",
-  variables = acs_vars,
-  year = 2011,
-  state = "AZ",
-  county = counties,
-  geometry = TRUE,
-  output = "wide"
-) %>% st_transform(st_crs(fishnet))
-
-# Download 2021 ACS
-pop21 <- tidycensus::get_acs(
-  geography = "tract",
-  variables = acs_vars,
-  year = 2021,
-  state = "AZ",
-  county = counties,
-  geometry = TRUE,
-  output = "wide"
-) %>% st_transform(st_crs(fishnet))
-
-# Areal-weighted interpolation onto fishnet
-fishnet <- fishnet %>%
-  st_interpolate_aw(pop11[c("popE", "incomeE", "housingE")], extensive = TRUE) %>%
-  rename(pop_2011 = popE,
-         income_2011 = incomeE,
-         housing_2011 = housingE)
-
-fishnet <- fishnet %>%
-  st_interpolate_aw(pop21[c("popE", "incomeE", "housingE")], extensive = TRUE) %>%
-  rename(pop_2021 = popE,
-         income_2021 = incomeE,
-         housing_2021 = housingE)
+# Hypothetical new corridor: digitize or load
+# new_corr <- mapedit::editMap(mapview(centroids))$finished
+new_corr <- st_read("data/infra/proposed_corridor_2031.shp") %>% st_transform(st_crs(fishnet))
+fishnet$dist_new <- as.numeric(st_distance(centroids, new_corr))
 ```
 
-## 7.4 Environmental & Sensitive Lands (Assessment Only)
-```{r env-layers}
-# Load DEM and compute slope (optional predictor)
-# dem <- raster(file.path(data_dir, "dem/DEM_phoenix.tif"))
-# slope <- terrain(dem, opt = "slope", unit = "degrees")
-# fishnet$slope <- exact_extract(slope, fishnet, 'mean')
+# 11. Spatial Lag of Development
 
-# Load flood zones and protected areas for overlay later
-flood_zones <- st_read(file.path(data_dir, "flood/fema_flood.shp")) %>% st_transform(st_crs(fishnet))
-protected <- st_read(file.path(data_dir, "padus/padus_az.shp")) %>% st_transform(st_crs(fishnet))
+```{r spatial-lag}
+# Coordinates for knn
+grid_xy <- st_coordinates(centroids)
+dev_points1 <- fishnet_lc1 %>% filter(dev1==1) %>% st_centroid() %>% st_coordinates()
+fishnet$lagDev1 <- nn_function(grid_xy, dev_points1, k=2)
+
+# Repeat for t2
+dev_points2 <- fishnet_lc2 %>% filter(dev2==1) %>% st_centroid() %>% st_coordinates()
+fishnet$lagDev2 <- nn_function(grid_xy, dev_points2, k=2)
 ```
 
-# 8. Compile Model Data Sets
+# 12. County Fixed Effects
 
-```{r compile-data}
-# Select relevant columns for t1 model
-model_data_t1 <- fishnet %>%
-  st_drop_geometry() %>%
-  select(
-    development_change,
-    dist_roads,
-    dist_newinfra,
-    pop_2011,
-    income_2011,
-    housing_2011,
-    # slope,
-    cell_id
-  ) %>%
-  na.omit()
-
-# Prepare t2 inputs for forecasting (same variables, 2021 values)
-model_data_t2 <- fishnet %>%
-  st_drop_geometry() %>%
-  select(
-    dist_roads,
-    dist_newinfra,
-    pop_2021,
-    income_2021,
-    housing_2021,
-    cell_id
-  ) %>%
-  na.omit()
+```{r county-fe}
+cts <- counties(state="AZ", cb=TRUE) %>% st_transform(st_crs(fishnet)) %>%
+  filter(NAME %in% c("Maricopa","Pinal"))
+fishnet <- fishnet %>% st_join(cts["NAME"]) %>% rename(county=NAME)
 ```
 
-# 9. Exploratory Data Analysis
+# 13. Compile Modeling Data Sets
 
-```{r eda}
-# Example: distribution of dist_roads by development_change
-ggplot(model_data_t1, aes(x = development_change, y = dist_roads)) +
-  geom_boxplot() +
-  labs(title = "Distance to Roads by Development Change")
+```{r compile}
+# t1 data
+dat11 <- bind_cols(
+  st_drop_geometry(fishnet),
+  st_drop_geometry(fishnet_lc1),
+  st_drop_geometry(select(fishnet, dist_hwy, dist_new, lagDev1)),
+  st_drop_geometry(fishnet_pop11)
+) %>%
+  select(cell_id, development_change, everything()) %>%
+  filter(water1==0)
+# rename t1 vars by dropping suffixes
+
+# t2 data (forecast)
+dat21 <- bind_cols(
+  st_drop_geometry(fishnet),
+  st_drop_geometry(fishnet_lc2),
+  st_drop_geometry(select(fishnet, dist_hwy, dist_new, lagDev2)),
+  st_drop_geometry(fishnet_pop21)
+) %>% filter(water2==0)
 ```
 
-# 10. Model Training (2011 → 2021)
+# 14. Model Training & Validation
 
-```{r train-model}
-set.seed(2025)
-train_idx <- createDataPartition(model_data_t1$development_change, p = 0.7, list = FALSE)
-train <- model_data_t1[train_idx,]
-test  <- model_data_t1[-train_idx,]
-
-# Fit logistic regression
-logit_model <- glm(
-  development_change ~ dist_roads + dist_newinfra + pop_2011 + income_2011 + housing_2011,
-  data = train,
-  family = binomial(link = "logit")
-)
-summary(logit_model)
+```{r modeling}
+set.seed(1234)
+idx <- createDataPartition(dat11$development_change, p=.7, list=FALSE)
+train <- dat11[idx,]; test <- dat11[-idx,]
+# Fit logit\model <- glm(development_change~dist_hwy+dist_new+pop11+lagDev1+inc11+housing11+county,
+             data=train, family=binomial)
+summary(model)
+# ROC
+probs <- predict(model, test, type="response")
+ggplot(data.frame(obs=test$development_change, pred=probs),
+       aes(d=as.numeric(obs), m=pred)) + geom_roc() + theme_minimal()
+auc(roc(test$development_change, probs))
+# Confusion
+thr <- 0.1
+pred_class <- factor(ifelse(probs>thr,1,0))
+confusionMatrix(pred_class, factor(test$development_change), positive="1")
 ```
 
-# 11. Model Validation & Threshold Selection
+# 15. Forecast to 2031 & Impact Assessment
 
-```{r validate-model}
-# Predict probabilities on test set
-test$prob <- predict(logit_model, test, type = "response")
-
-# ROC and AUC
-roc_obj <- roc(test$development_change, test$prob)
-auc(roc_obj)
-plot(roc_obj, main = "ROC Curve")
-
-# Choose threshold (e.g., 0.1)
-thresh <- 0.1
-
-test$pred_class <- factor(ifelse(test$prob >= thresh, 1, 0))
-confusionMatrix(test$pred_class, test$development_change, positive = "1")
-```
-
-# 12. Forecasting for 2031
-
-```{r forecast-2031}
-# Apply model to t2 inputs
-forecast_df <- model_data_t2 %>%
-  mutate(
-    prob_2031 = predict(logit_model, newdata = ., type = "response"),
-    predict_2031 = factor(ifelse(prob_2031 >= thresh, 1, 0))
-  )
-
-# Join back to spatial for mapping
-forecast_sf <- fishnet %>%
-  right_join(forecast_df, by = "cell_id")
-
-# Map forecasted development
-library(ggplot2)
-ggplot(forecast_sf) +
-  geom_sf(aes(fill = predict_2031), color = NA) +
-  labs(title = "Predicted Development in 2031", fill = "Develop?") +
-  theme_minimal()
-```
-
-# 13. Impact Assessment on Sensitive Lands
-
-```{r impact-assessment}
-# Overlap forecast with flood zones
-flood_overlap <- st_intersects(forecast_sf, flood_zones, sparse = FALSE)
-forecast_sf$flood_risk <- as.logical(rowSums(flood_overlap))
-
-# Overlap forecast with protected areas
-prot_overlap <- st_intersects(forecast_sf, protected, sparse = FALSE)
-forecast_sf$protected_risk <- as.logical(rowSums(prot_overlap))
-
-# Summarize risk metrics
-dashboard <- forecast_sf %>%
-  st_drop_geometry() %>%
-  filter(predict_2031 == 1) %>%
+```{r forecast}
+# Predict
+dat21$prob31 <- predict(model, dat21, type="response")
+dat21$pred31 <- factor(ifelse(dat21$prob31>thr,1,0))
+forecast_sf <- left_join(fishnet, dat21, by="cell_id")
+# Sensitive overlays
+flood <- st_read("data/flood/fema_flood.shp") %>% st_transform(st_crs(fishnet))
+prot  <- st_read("data/padus/padus_az.shp") %>% st_transform(st_crs(fishnet))
+forecast_sf$flood_risk <- lengths(st_intersects(forecast_sf, flood))>0
+forecast_sf$prot_risk  <- lengths(st_intersects(forecast_sf, prot))>0
+# Summary
+risk_sum <- forecast_sf %>%
+  filter(pred31==1) %>%
   summarize(
-    pct_in_flood = mean(flood_risk) * 100,
-    pct_in_protected = mean(protected_risk) * 100,
-    total_cells = n()
+    pct_flood=sum(flood_risk)/n()*100,
+    pct_prot=sum(prot_risk)/n()*100
   )
-
-kable(dashboard)
+kable(risk_sum)
+# Map
+ggplot(forecast_sf) +
+  geom_sf(aes(fill=pred31), color=NA) +
+  geom_sf(data=phx_msa, fill=NA) +
+  labs(title="Projected 2031 Development") +
+  theme_void()
 ```
 
-# 14. Recommendations
+# Recommendations
 
-1. **Protect Flood-Prone Areas:** Based on the forecast, ~`r round(dashboard$pct_in_flood,1)`% of projected growth falls within 100-year flood zones; strengthen floodplain zoning.
-2. **Conserve Critical Habitats:** ~`r round(dashboard$pct_in_protected,1)`% overlaps protected lands; establish buffer zones.
-3. **Promote Infill Near New Transit:** Focus density incentives within 0.5 mi of the proposed 2031 corridor (dist_newinfra < <INSERT_BUFFER_DIST>) to curb leapfrog sprawl.
+1. Strengthen floodplain regulations where > `r round(risk_sum$pct_flood,1)`% expansion occurs in flood zones.  
+2. Establish green buffers around protected lands given ~`r round(risk_sum$pct_prot,1)`% overlap.  
+3. Incentivize infill and higher density within 0.5 mi of the new corridor to curb leapfrog sprawl.
 
-# Appendix
-- Full regression output (`summary(logit_model)`)
-- Confusion matrix and ROC curve
-- Data dictionary of variables and units
+---
+
+<small>Adapted from Houston Urban Growth Modeling example (Fichman et al.).</small>
