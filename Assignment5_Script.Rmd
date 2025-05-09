@@ -15,10 +15,6 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-# -----------------------------------
-# 0. SETUP
-# -----------------------------------
-# Set global chunk options
 knitr::opts_chunk$set(
   echo = TRUE,           # Show code in output
   warning = FALSE,       # Hide warnings
@@ -27,7 +23,6 @@ knitr::opts_chunk$set(
   fig.height = 5         # Default figure height
 )
 
-# Load required libraries - install if missing
 required_pkgs <- c(
   "tidyverse", "sf", "raster", "terra", "exactextractr",
   "caret", "pROC", "kableExtra", "tidycensus", "tigris",
@@ -38,14 +33,12 @@ lapply(required_pkgs, function(pkg) {
   library(pkg, character.only = TRUE)
 })
 
-# Placeholder: define CRS for Phoenix MSA (e.g., EPSG:26912 or 3857)
-crs_proj <- <INSERT_EPSG_CODE>  # e.g., 26912
+# Define CRS
+crs_proj <- 26812  # e.g., 26912
 
 # Placeholder: grid resolution in map units (e.g., 300 for 300m)
-grid_res <- <INSERT_GRID_RESOLUTION>
+grid_res <- 300
 
-# Placeholder: path to your project data directory
-data_dir <- "<PATH/TO/your_project/data>"
 ```
 
 # 1. Introduction
