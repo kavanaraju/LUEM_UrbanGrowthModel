@@ -82,7 +82,7 @@ This report builds a spatial logistic regression model of urban development in t
 
 ```{r load-boundary}
 # Load Boundary for Phoem
-phx_msa <- st_read("data/boundaries/phoenix_msa.geojson", quiet=TRUE) %>%
+phx_msa <- st_read("data/Phoenix_MSA/Phoenix_MSA.shp", quiet=TRUE) %>%
   st_transform(26912)  # NAD83 / Arizona Central
 ```
 
@@ -193,7 +193,7 @@ hwys <- primary_secondary_roads(state="AZ") %>% st_transform(st_crs(fishnet)) %>
 centroids <- st_centroid(fishnet)
 fishnet$dist_hwy <- as.numeric(st_distance(centroids, hwys))
 
-# Hypothetical new corridor: digitize or load
+# Proposed new corridor
 # new_corr <- mapedit::editMap(mapview(centroids))$finished
 new_corr <- st_read("data/infra/proposed_corridor_2031.shp") %>% st_transform(st_crs(fishnet))
 fishnet$dist_new <- as.numeric(st_distance(centroids, new_corr))
