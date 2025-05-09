@@ -89,9 +89,27 @@ phx_msa <- st_read("data/Phoenix_MSA/Phoenix_MSA.shp", quiet=TRUE) %>%
 # 4. Load Land Cover Data (NLCD)
 
 ```{r load-nlcd}
-# Fetch NLCD via FedData
-lc_2011 <- get_nlcd(template=phx_msa, label="lc_2011", year=2011) %>% raster()
-lc_2021 <- get_nlcd(template=phx_msa, label="lc_2021", year=2021) %>% raster()
+# Load NLCDrasters
+lc_2011 <- raster("data/Annual_NLCD_LndCov_2011_CU_C1V0.tif")  
+lc_2021 <- raster("data/Annual_NLCD_LndCov_2021_CU_C1V0.tif")
+
+# Transform the MSA boundary to match the raster CRS
+phx_msa_r <- st_transform(phx_msa, crs(lc_2011))
+
+# Crop and mask the country-wide rasters to the Phoenix MSA boundary
+lc_2011 <- crop(lc_2011, phx_msa_r)
+lc_2011 <- mask(lc_2011, phx_msa_r)
+
+lc_2021 <- crop(lc_2021, phx_msa_r)
+lc_2021 <- mask(lc_2021, phx_msa_r)
+
+# Reproject masked rasters back to study CRS
+lc_2011 <- projectRaster(lc_2011, crs = 26912)
+lc_2021 <- projectRaster(lc_2021, crs = 26912)
+
+# Verify extent now matches study area
+print(extent(lc_2011))
+print(extent(lc_2021))
 ```
 
 # 5. Detecting Land Cover Conversion
