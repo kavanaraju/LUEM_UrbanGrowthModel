@@ -2,7 +2,7 @@
 # CPLN 6750 – Phoenix Urban Growth Forecast, 2031
 
 **Authors:** Sravya Dandamudi & Kavana Raju
-**Date:** ** 5/10/2025
+**Date:** ** 5/10/2025 **
 
 ---
 
@@ -40,26 +40,30 @@ rast <- function(inRaster) {
   df <- data.frame(xyFromCell(inRaster, 1:ncell(inRaster)),
                    value=getValues(inRaster))
   colnames(df) <- c('x','y','value')
-  df
-}
+  df}
+
 nn_function <- function(measureFrom, measureTo, k) {
   mf <- as.matrix(measureFrom)
   mt <- as.matrix(measureTo)
   dists <- get.knnx(mt, mf, k)$nn.dist
-  rowMeans(dists)
-}
+  rowMeans(dists)}
+
 aggregateRaster <- function(rasterList, fishnet) {
-  result <- fishnet %>% select()
+  # Initialize result with the original fishnet
+  result <- fishnet
   for(r in rasterList) {
     nm <- names(r)
-    pts <- rasterToPoints(r) %>% as.data.frame() %>%
-      st_as_sf(coords=c('x','y'), crs=st_crs(fishnet)) %>%
-      filter(get(nm)==1)
-    agg <- aggregate(pts, fishnet, length) %>%
-      mutate(!!nm := ifelse(is.na(layer), 0, 1)) %>% select(-layer)
-    result <- cbind(result, agg)
+    # Convert raster cells == 1 to points (use the named column)
+    pts <- rasterToPoints(r) %>%
+      as.data.frame() %>%
+      dplyr::filter(.data[[nm]] == 1) %>%
+      st_as_sf(coords = c('x','y'), crs = st_crs(fishnet))
+    # Count points per fishnet cell
+    agg <- aggregate(pts, fishnet, FUN = length)
+    # Create binary indicator: 1 if any point falls inside
+    result[[nm]] <- ifelse(is.na(agg$layer) | agg$layer == 0, 0, 1)
   }
-  result
+  return(result)
 }
 ```
 
@@ -106,12 +110,8 @@ lc_2021 <- mask(lc_2021, phx_msa_r)
 # Reproject masked rasters back to study CRS
 lc_2011 <- projectRaster(lc_2011, crs = 26912)
 lc_2021 <- projectRaster(lc_2021, crs = 26912)
-
-# Verify extent now matches study area
-print(extent(lc_2011))
-print(extent(lc_2021))
 ```
-```{r}
+```{r save-lc}
 writeRaster(
   x         = lc_2011,
   filename  = "data/LC_2011_PhoenixMSA",
@@ -135,13 +135,15 @@ lc2_rs <- aggregate(lc_2021, fact=10, fun="modal")
 # Align origins, resolution, and extent
 lc2_rs <- resample(lc2_rs, lc1_rs, method="ngb")
 
-# Reclassify to binary developed
+# Reclassify developed classes (NLCD 21–24)
 rc <- matrix(c(0,12,0, 12,24,1, 24,Inf,0), ncol=3, byrow=TRUE)
 dev1 <- reclassify(lc1_rs, rc)
 dev2 <- reclassify(lc2_rs, rc)
 
 # Map algebra: 1 = change from undeveloped to developed
+# dev1=0 & dev2=1 => converted; dev1=1 & dev2=0 => unlikely here
 dev_change <- dev1 + dev2
+# Keep only converted cells
 dev_change[dev_change != 1] <- NA
 ```
 
@@ -157,11 +159,15 @@ fishnet <- st_make_grid(phx_msa, cellsize=grid_res, square=TRUE) %>%
 # 7. Join Raster Change to Fishnet
 
 ```{r join-change}
-pts_change <- rasterToPoints(dev_change) %>% as.data.frame() %>%
-  st_as_sf(coords=c('x','y'), crs=st_crs(fishnet))
-fishnet <- aggregate(pts_change, fishnet, FUN=sum) %>%
-  mutate(development_change = factor(ifelse(layer>0,1,0))) %>%
-  select(-layer)
+# Convert the change raster to points
+pts_change <- rasterToPoints(dev_change) %>% 
+  as.data.frame() %>% 
+  st_as_sf(coords = c('x','y'), crs = st_crs(fishnet))
+
+# Aggregate change points to fishnet grid
+fishnet <- aggregate(pts_change, fishnet, FUN = sum) %>%
+  mutate(development_change = factor(ifelse(layer > 0, 1, 0))) %>%
+  dplyr::select(-layer)
 ```
 
 # 8. Aggregating Land Cover Categories
@@ -197,50 +203,111 @@ fishnet_lc2 <- aggregateRaster(rasters2, fishnet)
 # 9. Population & Socioeconomic Data via tidycensus
 
 ```{r census}
-# Enter your key
 census_api_key("52f0462d8b4e1e19ee64b25a3196677c5e32e660", install=FALSE)
 
-# Variables
-vars <- c(pop="B01003_001E", income="B19013_001E", housing="B25001_001E")
+# Variables: total population, median income, housing units
+tidy_vars <- c(pop = "B01003_001E",
+               income = "B19013_001E",
+               housing = "B25001_001E")
 
-# Download 2011 and 2021 at tract level, for Maricopa & Pinal
-counties <- c("Maricopa","Pinal")
-acs11 <- get_acs("tract", vars, year=2011, state="AZ", county=counties,
-                 geometry=TRUE, output="wide") %>% st_transform(st_crs(fishnet))
-acs21 <- get_acs("tract", vars, year=2021, state="AZ", county=counties,
-                 geometry=TRUE, output="wide") %>% st_transform(st_crs(fishnet))
+# Specify counties for Phoenix MSA
+counties <- c("Maricopa", "Pinal")
 
-# Areal weighted interpolation
-fishnet_pop11 <- st_interpolate_aw(acs11[c("popE","incomeE","housingE")], fishnet)
-names(fishnet_pop11) <- c("pop11","inc11","house11")
-fishnet_pop21 <- st_interpolate_aw(acs21[c("popE","incomeE","housingE")], fishnet)
-names(fishnet_pop21) <- c("pop21","inc21","house21")
+# Download 2011 ACS (wide format) and rename estimate columns
+acs11 <- get_acs(
+  geography = "tract",
+  variables = tidy_vars,
+  year = 2011,
+  state = "AZ",
+  county = counties,
+  geometry = TRUE,
+  output = "wide"
+) %>%
+  st_transform(st_crs(fishnet)) %>%
+  rename(
+    pop11 = pop,
+    inc11 = income,
+    house11 = housing
+  ) %>%
+  dplyr::select(GEOID, pop11, inc11, house11, geometry)
+
+# Download 2021 ACS (wide format) and rename estimate columns
+acs21 <- get_acs(
+  geography = "tract",
+  variables = tidy_vars,
+  year = 2021,
+  state = "AZ",
+  county = counties,
+  geometry = TRUE,
+  output = "wide"
+) %>%
+  st_transform(st_crs(fishnet)) %>%
+  rename(
+    pop21 = pop,
+    inc21 = income,
+    house21 = housing
+  ) %>%
+  dplyr::select(GEOID, pop21, inc21, house21, geometry)
+
+# Areal-weighted interpolation onto fishnet
+fishnet_pop11 <- st_interpolate_aw(
+  acs11[c("pop11", "inc11", "house11")],
+  fishnet,
+  extensive = TRUE
+)
+fishnet_pop21 <- st_interpolate_aw(
+  acs21[c("pop21", "inc21", "house21")],
+  fishnet,
+  extensive = TRUE
+)
 ```
 
 # 10. Transportation & Infrastructure Features
 
 ```{r transport}
 # Load existing light rail network
-existing_lr <- st_read("data/LightRail_Existing/LightRail_Existing.shp") %>%
-  st_transform(st_crs(fishnet))
+existing_lr <- st_read("data/LightRail_Existing/LightRail_Existing.shp")
+
+existing_lr <- st_transform(existing_lr, st_crs(fishnet))
+
+# Compute distance from each cell centroid to nearest existing light rail line
+centroids <- st_centroid(fishnet)
+fishnet$dist_lr_existing <- as.numeric(
+  st_distance(centroids, st_union(existing_lr)))
 
 # Proposed extension
-# new_corr <- mapedit::editMap(mapview(centroids))$finished
-new_corr <- st_read("data/LightRail_Extension/LightRail_Extension.shp") %>% st_transform(st_crs(fishnet))
-fishnet$dist_new <- as.numeric(st_distance(centroids, new_corr))
+new_lr <- st_read("data/LightRail_Extension/LightRail_Extension.shp")
+
+new_lr <- st_transform(new_lr, st_crs(fishnet))
+
+fishnet$dist_new <- as.numeric(st_distance(centroids, new_lr))
 ```
 
 # 11. Spatial Lag of Development
 
 ```{r spatial-lag}
-# Coordinates for knn
-grid_xy <- st_coordinates(centroids)
-dev_points1 <- fishnet_lc1 %>% filter(dev1==1) %>% st_centroid() %>% st_coordinates()
-fishnet$lagDev1 <- nn_function(grid_xy, dev_points1, k=2)
+# Coordinates for KNN: fishnet centroids
+grid_xy <- st_coordinates(st_centroid(fishnet))
 
-# Repeat for t2
-dev_points2 <- fishnet_lc2 %>% filter(dev2==1) %>% st_centroid() %>% st_coordinates()
-fishnet$lagDev2 <- nn_function(grid_xy, dev_points2, k=2)
+# Ensure dev1 and dev2 are numeric vectors (0/1)
+fishnet_lc1 <- fishnet_lc1 %>% mutate(dev1 = as.numeric(dev1))
+fishnet_lc2 <- fishnet_lc2 %>% mutate(dev2 = as.numeric(dev2))
+
+# Extract points for cells that developed in t1 and t2
+points1 <- fishnet_lc1 %>%
+  filter(.data$dev1 == 1) %>%
+  st_centroid() %>%
+  st_coordinates()
+points2 <- fishnet_lc2 %>%
+  filter(.data$dev2 == 1) %>%
+  st_centroid() %>%
+  st_coordinates()
+
+# Compute spatial lag distances (average to 2 nearest developed cells)
+fishnet <- fishnet %>% mutate(
+  lagDev1 = nn_function(grid_xy, points1, k = 2),  # t1 spatial lag
+  lagDev2 = nn_function(grid_xy, points2, k = 2)   # t2 spatial lag
+)
 ```
 
 # 12. County Fixed Effects
