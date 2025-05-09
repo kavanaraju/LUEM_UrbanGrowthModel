@@ -150,7 +150,27 @@ dev_change[dev_change != 1] <- NA
 # 6. Creating the Fishnet Grid
 
 ```{r fishnet}
-grid_res <- res(lc1_rs)[1]
+grid_res <- res(lc1_rs)[1] #cell size
+
+# 1. Generate a uniform grid covering the MSA extent
+grid      <- st_make_grid(
+  phx_msa,
+  cellsize = grid_res,
+  square   = TRUE
+)
+
+# 2. Convert to an sf object so we can manipulate it
+grid_sf   <- st_sf(grid)
+
+# 3. Clip the grid to the exact MSA boundary (intersection)
+grid_clipped <- st_intersection(grid_sf, phx_msa)
+
+# 4. Add a unique ID for each cell to facilitate joins
+after_clip <- grid_clipped %>% mutate(cell_id = row_number())
+
+# Assign to 'fishnet'
+fishnet  <- after_clip
+
 fishnet <- st_make_grid(phx_msa, cellsize=grid_res, square=TRUE) %>%
   st_sf() %>% st_intersection(phx_msa) %>%
   mutate(cell_id = row_number())
@@ -173,30 +193,28 @@ fishnet <- aggregate(pts_change, fishnet, FUN = sum) %>%
 # 8. Aggregating Land Cover Categories
 
 ```{r lc-categories}
-# Reclassify full NLCD into categories
-lc1_rs %>% names() # check
-# Example: Developed, Forest, Farm, Wetlands, Other, Water
-dev_2011 <- lc1_rs %in% c(21:24);
-forest_2011 <- lc1_rs %in% c(41:43);
-farm_2011 <- lc1_rs %in% c(81:82);
-wet_2011 <- lc1_rs %in% c(90,95);
-oth_2011 <- lc1_rs %in% c(52,71,31);
-water_2011 <- lc1_rs == 11
+# Define binary reclassified rasters for 2011 (t1)
+dev1      <- lc1_rs %in% c(21:24);    names(dev1)      <- "dev1"
+forest1   <- lc1_rs %in% c(41:43);    names(forest1)   <- "forest1"
+farm1     <- lc1_rs %in% c(81:82);    names(farm1)     <- "farm1"
+wet1      <- lc1_rs %in% c(90,95);    names(wet1)      <- "wet1"
+oth1      <- lc1_rs %in% c(31,52,71); names(oth1)      <- "oth1"
+water1    <- lc1_rs == 11;            names(water1)    <- "water1"
 
-# Name and aggregate
-names_list1 <- c("dev1","forest1","farm1","wet1","oth1","water1")
-rasters1 <- setNames(list(dev_2011, forest_2011, farm_2011, wet_2011, oth_2011, water_2011), names_list1)
+# Aggregate all t1 categories into fishnet
+rasters1  <- list(dev1, forest1, farm1, wet1, oth1, water1)
 fishnet_lc1 <- aggregateRaster(rasters1, fishnet)
 
-# Repeat for 2021
-dev_2021 <- lc2_rs %in% c(21:24);
-forest_2021 <- lc2_rs %in% c(41:43);
-farm_2021 <- lc2_rs %in% c(81:82);
-wet_2021 <- lc2_rs %in% c(90,95);
-oth_2021 <- lc2_rs %in% c(52,71,31);
-water_2021 <- lc2_rs == 11
-rasters2 <- setNames(list(dev_2021, forest_2021, farm_2021, wet_2021, oth_2021, water_2021),
-                     c("dev2","forest2","farm2","wet2","oth2","water2"))
+# Define binary reclassified rasters for 2021 (t2)
+dev2      <- lc2_rs %in% c(21:24);    names(dev2)      <- "dev2"
+forest2   <- lc2_rs %in% c(41:43);    names(forest2)   <- "forest2"
+farm2     <- lc2_rs %in% c(81:82);    names(farm2)     <- "farm2"
+wet2      <- lc2_rs %in% c(90,95);    names(wet2)      <- "wet2"
+oth2      <- lc2_rs %in% c(31,52,71); names(oth2)      <- "oth2"
+water2    <- lc2_rs == 11;            names(water2)    <- "water2"
+
+# Aggregate all t2 categories into fishnet
+rasters2  <- list(dev2, forest2, farm2, wet2, oth2, water2)
 fishnet_lc2 <- aggregateRaster(rasters2, fishnet)
 ```
 
@@ -286,28 +304,34 @@ fishnet$dist_new <- as.numeric(st_distance(centroids, new_lr))
 # 11. Spatial Lag of Development
 
 ```{r spatial-lag}
-# Coordinates for KNN: fishnet centroids
-grid_xy <- st_coordinates(st_centroid(fishnet))
+# Compute centroids once
+centroids <- st_centroid(fishnet)
+# Matrix of fishnet centroid coordinates
+grid_xy <- st_coordinates(centroids)
 
-# Ensure dev1 and dev2 are numeric vectors (0/1)
-fishnet_lc1 <- fishnet_lc1 %>% mutate(dev1 = as.numeric(dev1))
-fishnet_lc2 <- fishnet_lc2 %>% mutate(dev2 = as.numeric(dev2))
+# Extract fishnet_lc layers: dev1 and dev2 should already be numeric 0/1 columns
+# No need to re-mutate dev1/dev2
 
-# Extract points for cells that developed in t1 and t2
-points1 <- fishnet_lc1 %>%
-  filter(.data$dev1 == 1) %>%
+# Points of converted cells in t1 and t2
+t1_points <- fishnet_lc1 %>%
+  filter(dev1 == 1) %>%        # dev1 is numeric vector
   st_centroid() %>%
   st_coordinates()
-points2 <- fishnet_lc2 %>%
-  filter(.data$dev2 == 1) %>%
+t2_points <- fishnet_lc2 %>%
+  filter(dev2 == 1) %>%
   st_centroid() %>%
   st_coordinates()
 
-# Compute spatial lag distances (average to 2 nearest developed cells)
-fishnet <- fishnet %>% mutate(
-  lagDev1 = nn_function(grid_xy, points1, k = 2),  # t1 spatial lag
-  lagDev2 = nn_function(grid_xy, points2, k = 2)   # t2 spatial lag
-)
+# Compute spatial lag: average distance to 2 nearest developed cells
+grid_lag1 <- nn_function(grid_xy, t1_points, k = 2)
+grid_lag2 <- nn_function(grid_xy, t2_points, k = 2)
+
+# Attach lag variables back to fishnet
+fishnet <- fishnet %>%
+  mutate(
+    lagDev1 = grid_lag1,
+    lagDev2 = grid_lag2
+  )
 ```
 
 # 12. County Fixed Effects
