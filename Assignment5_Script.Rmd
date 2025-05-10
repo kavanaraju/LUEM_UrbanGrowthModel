@@ -524,85 +524,67 @@ cat("Test‐set AUC =", round(auc_val, 3), "\n")
 
 # 15. Forecast to 2031 & Impact Assessment
 
-```{r prepare-t2}
-# Build a clean pop21_df by spatially joining cell_id from fishnet
-# (this preserves ALL fishnet cells and their correct IDs)
+```{r forecast}
 
+# 15A. Build trimmed 2021 census table with matching cell_id
 pop21_df <- fishnet_pop21 %>%
-  # turn the AWI result into centroids so we can join point→polygon
   st_centroid() %>%
-  st_join(
-    fishnet %>% select(cell_id),   # just the cell_id and geometry of fishnet
-    join = st_within
-  ) %>%
-  # now select only the variables we need
-  dplyr::select(cell_id, pop21, inc21, house21) %>%
+  st_join(dplyr::select(fishnet, cell_id), join = st_within) %>%
   st_drop_geometry() %>%
+  dplyr::select(cell_id, pop21, inc21, house21) %>%
   distinct(cell_id, .keep_all = TRUE)
 
-# sanity check
-nrow(pop21_df)        # should equal nrow(fishnet)
-sum(is.na(pop21_df))  # hopefully zero or just the imputed inc21 if you did that
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Step 15A. Build the 2021 feature table (dat21)
-# ─────────────────────────────────────────────────────────────────────────────
-
-# 1. Land‐cover flags for 2021 (from fishnet_lc2)
-lc2_df <- fishnet_lc2 %>%
+# 15B. Assemble dat21: LC flags, infra+lag, census
+lc2_df   <- fishnet_lc2 %>%
   st_drop_geometry() %>%
-  dplyr::select(cell_id, dev2, forest2, farm2, wet2, oth2)  # drop water2 here if you like
+  dplyr::select(cell_id, dev2, forest2, farm2, wet2, oth2)
 
-# 2. Infrastructure + lag + county (from fishnet)
 feat2_df <- fishnet %>%
   st_drop_geometry() %>%
-  rename(dist_hwy = dist_lr_existing) %>%    # rename to match model
+  rename(dist_hwy = dist_lr_existing) %>%
   dplyr::select(cell_id, dist_hwy, dist_new, lagDev2, county)
 
-# 3. 2021 census estimates (from fishnet_pop21)
-pop21_df <- fishnet_pop21 %>%
-  st_drop_geometry() %>%
-  mutate(cell_id = fishnet$cell_id) %>%      # ensure the same cell_id ordering
-  dplyr::select(cell_id, pop21, inc21, house21)
-
-# 4. Left‐join them all and drop any water cells
 dat21 <- lc2_df %>%
   left_join(feat2_df, by = "cell_id") %>%
   left_join(pop21_df,  by = "cell_id") %>%
   filter(wet2 == 0)
 
-# Quick sanity checks
-glimpse(dat21)
-table(dat21$dev2)
-```
+# 15C. Impute any remaining NAs
+dat21 <- dat21 %>%
+  mutate(
+    pop21   = replace_na(pop21,   0),
+    house21 = replace_na(house21, 0),
+    inc21   = replace_na(inc21,   median(inc21, na.rm = TRUE))
+  )
 
-```{r forecast}
-# 15.1. Prepare 2021 Feature Table (dat21 already built earlier)
-#    (Ensure you've filtered wet2 == 0 as before.)
-# 15.2. Predict 2031 Development
+# Check no more NAs
+cat("NAs in dat21:", sum(is.na(dat21)), "\n")
+
+# 15D. Predict probabilities & binary outcome
 dat21$prob31 <- predict(model, dat21, type = "response")
+threshold     <- 0.10
 dat21$pred31 <- factor(
   ifelse(dat21$prob31 > threshold, "1", "0"),
   levels = c("0","1")
 )
 
-# 15.3. Join Predictions Back to Spatial Grid
+# 15E. Join back to spatial fishnet
 forecast_sf <- left_join(fishnet, dat21, by = "cell_id")
 
-# 15.4. Load Sensitive‐lands Overlays
+# 15F. Load and transform sensitive‐lands layers
 flood <- st_read("data/flood/fema_flood.shp", quiet = TRUE) %>%
            st_transform(st_crs(forecast_sf))
-prot  <- st_read("data/padus/padus_az.shp", quiet = TRUE) %>%
+prot  <- st_read("data/padus/padus_az.shp",   quiet = TRUE) %>%
            st_transform(st_crs(forecast_sf))
 
-# 15.5. Flag Risk Overlap
+# 15G. Flag risk overlaps
 forecast_sf <- forecast_sf %>%
   mutate(
-    flood_risk = (pred31 == "1") & lengths(st_intersects(geometry, flood)) > 0,
-    prot_risk  = (pred31 == "1") & lengths(st_intersects(geometry, prot))  > 0
+    flood_risk = (pred31 == "1") & (lengths(st_intersects(geometry, flood)) > 0),
+    prot_risk  = (pred31 == "1") & (lengths(st_intersects(geometry, prot))  > 0)
   )
 
-# 15.6. Summarize Risk Among Predicted Developments
+# 15H. Summarize risk among predicted developments
 risk_sum <- forecast_sf %>%
   filter(pred31 == "1") %>%
   st_drop_geometry() %>%
@@ -612,10 +594,9 @@ risk_sum <- forecast_sf %>%
     pct_prot    = mean(prot_risk)  * 100
   )
 knitr::kable(risk_sum, digits = 1,
-             caption = "2031 Forecast: Percent of Predicted Cells at Risk")
+             caption = "Percent of Predicted 2031 Cells at Risk")
 
-# 15.7. Map the 2031 Forecast
-library(ggplot2)
+# 15I. Map the 2031 forecast
 ggplot(forecast_sf) +
   geom_sf(aes(fill = pred31), color = NA) +
   geom_sf(data = phx_msa, fill = NA) +
@@ -625,11 +606,12 @@ ggplot(forecast_sf) +
     name   = "2031 Dev"
   ) +
   labs(
-    title = "Projected 2031 Development in Phoenix MSA",
+    title    = "Projected 2031 Development in Phoenix MSA",
     subtitle = glue::glue("Threshold = {threshold * 100}%"),
-    caption  = "Light‐rail extension scenario"
+    caption  = "Scenario: New light-rail extension"
   ) +
   theme_void()
+
 ```
 > 1. **Map** of cells predicted to develop by 2031.  
 > 2. **Table** showing `% in floodplain` and `% in protected areas`.  
