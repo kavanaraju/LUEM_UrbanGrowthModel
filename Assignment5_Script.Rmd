@@ -1,10 +1,18 @@
 ---
 # CPLN 6750 – Phoenix Urban Growth Forecast, 2031
 
-**Authors:** Sravya Dandamudi & Kavana Raju
-**Date:** ** 5/10/2025 **
+**To:** **Joshua Bednarek**  
 
+**From:** **Sravya Dandamudi & Kavana Raju**
+
+**Date:** **5/10/2025** 
+
+**Subject:** **Spatial Forecast of the Phoenix MSA for 2031**
 ---
+
+# Objective 
+
+Phoenix’s Planning and Development Department has started talking about creating the next comprehensive plan to ensure that the city has the proper guidance and information to invest in its future. To inform their decision-making, since comprehensive plans are looking at multiple different aspects of the city including the environment, economy, transportation, housing, etc, it is important to think about what land uses will look like in 2031. Phoenix has a new proposed light rail extension, so we looked at how this addition affects the way land is developed since it has a significant effect in how people move and what they able to access which would affect how land is developed. We looked at how different variables affected land use between 2011-2021 and then used those findings to see how land use would change for 2031.
 
 ```{r setup, include=FALSE}
 # -----------------------------------
@@ -48,21 +56,26 @@ nn_function <- function(measureFrom, measureTo, k) {
   dists <- get.knnx(mt, mf, k)$nn.dist
   rowMeans(dists)}
 
-aggregateRaster <- function(rasterList, fishnet) {
-  # Initialize result with the original fishnet
+aggregateRaster <- function(inputRasterList, fishnet) {
+  # 1. Start with your fishnet grid
   result <- fishnet
-  for(r in rasterList) {
-    nm <- names(r)
-    # Convert raster cells == 1 to points (use the named column)
-    pts <- rasterToPoints(r) %>%
-      as.data.frame() %>%
-      dplyr::filter(.data[[nm]] == 1) %>%
-      st_as_sf(coords = c('x','y'), crs = st_crs(fishnet))
-    # Count points per fishnet cell
-    agg <- aggregate(pts, fishnet, FUN = length)
-    # Create binary indicator: 1 if any point falls inside
-    result[[nm]] <- ifelse(is.na(agg$layer) | agg$layer == 0, 0, 1)
+  
+  # 2. For each binary raster layer in the list...
+  for(r in inputRasterList) {
+    nm <- names(r)  # e.g. "dev1", "forest1", etc.
+    
+    # 3. Count how many cells == 1 fall into each polygon
+    counts <- raster::extract(
+      r, 
+      result, 
+      fun = function(vals, ...) sum(vals == 1, na.rm = TRUE)
+    )
+    
+    # 4. Create a 0/1 flag and add as a new column
+    result[[nm]] <- ifelse(counts > 0, 1, 0)
   }
+  
+  # 5. Return the enriched fishnet
   return(result)
 }
 ```
@@ -111,6 +124,7 @@ lc_2021 <- mask(lc_2021, phx_msa_r)
 lc_2011 <- projectRaster(lc_2011, crs = 26912)
 lc_2021 <- projectRaster(lc_2021, crs = 26912)
 ```
+
 ```{r save-lc}
 writeRaster(
   x         = lc_2011,
@@ -152,11 +166,32 @@ dev_change[dev_change != 1] <- NA
 ```{r fishnet}
 grid_res <- res(lc1_rs)[1] #cell size
 
+#For Faster Processing as the Cell Size is Small
+# 1. Build the full grid over the MSA bounding box only
+bbox      <- st_bbox(phx_msa)
+grid_full <- st_make_grid(
+  phx_msa,
+  cellsize = grid_res,
+  square   = TRUE,
+  offset   = c(bbox$xmin, bbox$ymin),
+  n        = c(
+    ceiling((bbox$xmax - bbox$xmin) / grid_res),
+    ceiling((bbox$ymax - bbox$ymin) / grid_res)
+  )
+)
 
+# 2. Convert to sf
+grid_sf   <- st_sf(grid = grid_full)
 
-fishnet <- st_make_grid(phx_msa, cellsize=grid_res, square=TRUE) %>%
-  st_sf() %>% st_intersection(phx_msa) %>%
-  mutate(cell_id = row_number())
+# 3. Compute centroids once (cheap)
+centroids <- st_centroid(grid_sf)
+
+# 4. Keep only cells whose centroid lies _inside_ the MSA
+inside    <- st_within(centroids, phx_msa, sparse = FALSE)[,1]
+fishnet   <- grid_sf[inside, ]
+
+# 5. Assign unique IDs
+fishnet <- fishnet %>% mutate(cell_id = row_number())
 ```
 
 # 7. Join Raster Change to Fishnet
