@@ -57,26 +57,31 @@ nn_function <- function(measureFrom, measureTo, k) {
   rowMeans(dists)}
 
 aggregateRaster <- function(inputRasterList, fishnet) {
-  # 1. Start with your fishnet grid
-  result <- fishnet
-  
-  # 2. For each binary raster layer in the list...
-  for(r in inputRasterList) {
-    nm <- names(r)  # e.g. "dev1", "forest1", etc.
-    
-    # 3. Count how many cells == 1 fall into each polygon
-    counts <- raster::extract(
-      r, 
-      result, 
-      fun = function(vals, ...) sum(vals == 1, na.rm = TRUE)
-    )
-    
-    # 4. Create a 0/1 flag and add as a new column
-    result[[nm]] <- ifelse(counts > 0, 1, 0)
+  rasters     <- raster::stack(inputRasterList)
+  layer_names <- names(rasters)
+  result      <- fishnet
+
+  counts <- raster::extract(
+    rasters,
+    result,
+    fun = function(x, ...) {
+      if (is.null(dim(x))) {
+        sum(x == 1, na.rm = TRUE)
+      } else {
+        colSums(x == 1, na.rm = TRUE)
+      }
+    }
+  )
+
+  if (is.vector(counts)) {
+    counts <- matrix(counts, ncol = nlayers(rasters))
   }
-  
-  # 5. Return the enriched fishnet
-  return(result)
+  colnames(counts) <- layer_names
+
+  for (nm in layer_names) {
+    result[[nm]] <- as.integer(counts[, nm] > 0)
+  }
+  result
 }
 ```
 
@@ -208,32 +213,65 @@ fishnet <- aggregate(pts_change, fishnet, FUN = sum) %>%
   dplyr::select(-layer)
 ```
 
+```{r}
+save.image(file = "data/my_workspace.RData")
+
+load("data/my_workspace.RData")
+```
+
+
 # 8. Aggregating Land Cover Categories
+```{r}
+library(terra)
+library(raster)
+library(dplyr)
 
-```{r lc-categories}
-# Define binary reclassified rasters for 2011 (t1)
-dev1      <- lc1_rs %in% c(21:24);    names(dev1)      <- "dev1"
-forest1   <- lc1_rs %in% c(41:43);    names(forest1)   <- "forest1"
-farm1     <- lc1_rs %in% c(81:82);    names(farm1)     <- "farm1"
-wet1      <- lc1_rs %in% c(90,95);    names(wet1)      <- "wet1"
-oth1      <- lc1_rs %in% c(31,52,71); names(oth1)      <- "oth1"
-water1    <- lc1_rs == 11;            names(water1)    <- "water1"
+# 0. Ensure 'cell_id' exists on fishnet
+if (!"cell_id" %in% names(fishnet)) {
+  fishnet <- fishnet %>% mutate(cell_id = row_number())
+}
 
-# Aggregate all t1 categories into fishnet
-rasters1  <- list(dev1, forest1, farm1, wet1, oth1, water1)
-fishnet_lc1 <- aggregateRaster(rasters1, fishnet)
+# 1. Convert fishnet sf → SpatVector
+sv <- terra::vect(fishnet)
 
-# Define binary reclassified rasters for 2021 (t2)
-dev2      <- lc2_rs %in% c(21:24);    names(dev2)      <- "dev2"
-forest2   <- lc2_rs %in% c(41:43);    names(forest2)   <- "forest2"
-farm2     <- lc2_rs %in% c(81:82);    names(farm2)     <- "farm2"
-wet2      <- lc2_rs %in% c(90,95);    names(wet2)      <- "wet2"
-oth2      <- lc2_rs %in% c(31,52,71); names(oth2)      <- "oth2"
-water2    <- lc2_rs == 11;            names(water2)    <- "water2"
+# ---- 2011 land-cover categories ----
 
-# Aggregate all t2 categories into fishnet
-rasters2  <- list(dev2, forest2, farm2, wet2, oth2, water2)
-fishnet_lc2 <- aggregateRaster(rasters2, fishnet)
+# 2. Build SpatRaster stack of your 2011 binaries
+stack1 <- raster::stack(rasters1)   # RasterStack of dev1, forest1, etc.
+s1      <- terra::rast(stack1)      # now a SpatRaster; names already correct
+
+# 3. Rasterize zones (cell_id) onto the same grid
+template_rast <- s1[[1]]  
+zoneR         <- terra::rasterize(sv, template_rast, field = "cell_id")
+
+# 4. Zonal‐sum all layers in one C‐level call
+counts1 <- terra::zonal(s1, zoneR, fun = "sum", na.rm = TRUE)
+
+# 5. Convert to data.frame, join back, and flag >0 → 1/0
+df1 <- as.data.frame(counts1)
+colnames(df1)[1] <- "cell_id"
+
+fishnet_lc1 <- fishnet %>%
+  left_join(df1, by = "cell_id") %>%
+  mutate(across(.cols = names(s1), ~ as.integer(.x > 0)))
+
+# ---- 2021 land-cover categories ----
+
+# 6. Build SpatRaster stack of your 2021 binaries
+stack2 <- raster::stack(rasters2)
+s2      <- terra::rast(stack2)      # names carry over from rasters2
+
+# 7. Zonal‐sum onto the same zoneR
+counts2 <- terra::zonal(s2, zoneR, fun = "sum", na.rm = TRUE)
+
+# 8. Convert, join, and flag >0 → 1/0
+df2 <- as.data.frame(counts2)
+colnames(df2)[1] <- "cell_id"
+
+fishnet_lc2 <- fishnet %>%
+  left_join(df2, by = "cell_id") %>%
+  mutate(across(.cols = names(s2), ~ as.integer(.x > 0)))
+
 ```
 
 # 9. Population & Socioeconomic Data via tidycensus
@@ -363,73 +401,240 @@ fishnet <- fishnet %>% st_join(cts["NAME"]) %>% rename(county=NAME)
 # 13. Compile Modeling Data Sets
 
 ```{r compile}
-# t1 data
-dat11 <- bind_cols(
-  st_drop_geometry(fishnet),
-  st_drop_geometry(fishnet_lc1),
-  st_drop_geometry(select(fishnet, dist_hwy, dist_new, lagDev1)),
-  st_drop_geometry(fishnet_pop11)
-) %>%
-  select(cell_id, development_change, everything()) %>%
-  filter(water1==0)
-# rename t1 vars by dropping suffixes
+# ─────────────────────────────────────────────────────────────────────────────
+# 0. Recompute and prepare the 2011 population/census table, ensuring one row per cell_id
+# ─────────────────────────────────────────────────────────────────────────────
+fishnet_pop11 <- st_interpolate_aw(
+  acs11[c("pop11","inc11","house11")],
+  fishnet,
+  extensive = TRUE)
 
-# t2 data (forecast)
-dat21 <- bind_cols(
-  st_drop_geometry(fishnet),
-  st_drop_geometry(fishnet_lc2),
-  st_drop_geometry(select(fishnet, dist_hwy, dist_new, lagDev2)),
-  st_drop_geometry(fishnet_pop21)
-) %>% filter(water2==0)
+# Attach the matching cell_id from fishnet
+pop11_df <- fishnet_pop11 %>%
+  st_drop_geometry() %>%
+  mutate(cell_id = fishnet$cell_id) %>%
+  dplyr::select(cell_id, pop11, inc11, house11) %>%
+  distinct(cell_id, .keep_all = TRUE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. Land‐cover flags (base_lc1)
+# ─────────────────────────────────────────────────────────────────────────────
+base_lc1 <- fishnet_lc1 %>%
+  st_drop_geometry() %>%
+  dplyr::select(cell_id, dev1, forest1, farm1, wet1, oth1, water1) %>%
+  distinct(cell_id, .keep_all = TRUE)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. Change + distance + lag + county
+# ─────────────────────────────────────────────────────────────────────────────
+fishnet_df <- fishnet %>%
+  st_drop_geometry() %>%
+  rename(dist_hwy = dist_lr_existing) %>%
+  dplyr::select(cell_id, development_change, county, dist_hwy, dist_new, lagDev1)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. Assemble the 2011 training dataset
+# ─────────────────────────────────────────────────────────────────────────────
+dat11 <- base_lc1 %>%
+  left_join(fishnet_df, by = "cell_id") %>%
+  left_join(pop11_df,   by = "cell_id") %>%
+  filter(wet1 == 0) %>%
+  # HERE: recode any NA → 0 on development_change
+  mutate(
+    development_change = as.character(development_change),  # to avoid factor quirks
+    development_change = replace_na(development_change, "0"),
+    development_change = factor(development_change, levels = c("0","1"))
+  )
+
+dat11 <- dat11 %>%
+  # Impute median income for any missing cells
+  mutate(
+    inc11 = replace_na(inc11, median(inc11, na.rm = TRUE))
+  )
+
+# sanity check
+table(dat11$development_change)
+colSums(is.na(dat11))
 ```
 
 # 14. Model Training & Validation
 
 ```{r modeling}
-set.seed(1234)
-idx <- createDataPartition(dat11$development_change, p=.7, list=FALSE)
-train <- dat11[idx,]; test <- dat11[-idx,]
-# Fit logit\model <- glm(development_change~dist_hwy+dist_new+pop11+lagDev1+inc11+housing11+county,
-             data=train, family=binomial)
+set.seed(2025)
+train_i <- caret::createDataPartition(
+  y    = dat11$development_change,
+  p    = 0.70,
+  list = FALSE
+)
+train <- dat11[train_i, ]
+test  <- dat11[-train_i, ]
+
+# Check class balance
+prop.table(table(train$development_change))
+prop.table(table(test$development_change))
+
+# 14.2. Fit the Logistic Regression Model
+model <- glm(
+  development_change ~ 
+    dist_hwy + dist_new + lagDev1 +
+    pop11  + inc11   + house11 +
+    dev1   + forest1 + farm1   + oth1   +
+    county,
+  data   = train,
+  family = binomial(link = "logit")
+)
 summary(model)
-# ROC
-probs <- predict(model, test, type="response")
-ggplot(data.frame(obs=test$development_change, pred=probs),
-       aes(d=as.numeric(obs), m=pred)) + geom_roc() + theme_minimal()
-auc(roc(test$development_change, probs))
-# Confusion
-thr <- 0.1
-pred_class <- factor(ifelse(probs>thr,1,0))
-confusionMatrix(pred_class, factor(test$development_change), positive="1")
+
+# 14.3. Predict on Test Set
+test$prob <- predict(model, test, type = "response")
+
+# 14.4. Choose Threshold & Confusion Matrix
+threshold <- 0.10
+test$pred_class <- factor(
+  ifelse(test$prob > threshold, "1", "0"),
+  levels = c("0","1")
+)
+cm <- caret::confusionMatrix(
+  test$pred_class,
+  factor(test$development_change),
+  positive = "1"
+)
+print(cm)
+
+# 14.5. ROC Curve & AUC
+library(plotROC)
+roc_df <- data.frame(
+  obs  = as.numeric(test$development_change),
+  pred = test$prob
+)
+ggplot(roc_df, aes(d = obs, m = pred)) +
+  geom_roc(n.cuts = 50) +
+  style_roc(theme = theme_minimal()) +
+  labs(title = "ROC Curve (Test Set)")
+
+library(yardstick)
+auc_val <- roc_auc_vec(test$development_change, test$prob)
+cat("Test‐set AUC =", round(auc_val, 3), "\n")
 ```
+
+> **To Report:**  
+> - **Coefficients:** signs, significance, and e^(β) for interpretation  
+> - **Confusion matrix:** accuracy, sensitivity (TPR), specificity (TNR) at your chosen threshold  
+> - **AUC** from the ROC (should be ≥ 0.7 for a useful model)
 
 # 15. Forecast to 2031 & Impact Assessment
 
+```{r prepare-t2}
+# Build a clean pop21_df by spatially joining cell_id from fishnet
+# (this preserves ALL fishnet cells and their correct IDs)
+
+pop21_df <- fishnet_pop21 %>%
+  # turn the AWI result into centroids so we can join point→polygon
+  st_centroid() %>%
+  st_join(
+    fishnet %>% select(cell_id),   # just the cell_id and geometry of fishnet
+    join = st_within
+  ) %>%
+  # now select only the variables we need
+  dplyr::select(cell_id, pop21, inc21, house21) %>%
+  st_drop_geometry() %>%
+  distinct(cell_id, .keep_all = TRUE)
+
+# sanity check
+nrow(pop21_df)        # should equal nrow(fishnet)
+sum(is.na(pop21_df))  # hopefully zero or just the imputed inc21 if you did that
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step 15A. Build the 2021 feature table (dat21)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. Land‐cover flags for 2021 (from fishnet_lc2)
+lc2_df <- fishnet_lc2 %>%
+  st_drop_geometry() %>%
+  dplyr::select(cell_id, dev2, forest2, farm2, wet2, oth2)  # drop water2 here if you like
+
+# 2. Infrastructure + lag + county (from fishnet)
+feat2_df <- fishnet %>%
+  st_drop_geometry() %>%
+  rename(dist_hwy = dist_lr_existing) %>%    # rename to match model
+  dplyr::select(cell_id, dist_hwy, dist_new, lagDev2, county)
+
+# 3. 2021 census estimates (from fishnet_pop21)
+pop21_df <- fishnet_pop21 %>%
+  st_drop_geometry() %>%
+  mutate(cell_id = fishnet$cell_id) %>%      # ensure the same cell_id ordering
+  dplyr::select(cell_id, pop21, inc21, house21)
+
+# 4. Left‐join them all and drop any water cells
+dat21 <- lc2_df %>%
+  left_join(feat2_df, by = "cell_id") %>%
+  left_join(pop21_df,  by = "cell_id") %>%
+  filter(wet2 == 0)
+
+# Quick sanity checks
+glimpse(dat21)
+table(dat21$dev2)
+```
+
 ```{r forecast}
-# Predict
-dat21$prob31 <- predict(model, dat21, type="response")
-dat21$pred31 <- factor(ifelse(dat21$prob31>thr,1,0))
-forecast_sf <- left_join(fishnet, dat21, by="cell_id")
-# Sensitive overlays
-flood <- st_read("data/flood/fema_flood.shp") %>% st_transform(st_crs(fishnet))
-prot  <- st_read("data/padus/padus_az.shp") %>% st_transform(st_crs(fishnet))
-forecast_sf$flood_risk <- lengths(st_intersects(forecast_sf, flood))>0
-forecast_sf$prot_risk  <- lengths(st_intersects(forecast_sf, prot))>0
-# Summary
-risk_sum <- forecast_sf %>%
-  filter(pred31==1) %>%
-  summarize(
-    pct_flood=sum(flood_risk)/n()*100,
-    pct_prot=sum(prot_risk)/n()*100
+# 15.1. Prepare 2021 Feature Table (dat21 already built earlier)
+#    (Ensure you've filtered wet2 == 0 as before.)
+# 15.2. Predict 2031 Development
+dat21$prob31 <- predict(model, dat21, type = "response")
+dat21$pred31 <- factor(
+  ifelse(dat21$prob31 > threshold, "1", "0"),
+  levels = c("0","1")
+)
+
+# 15.3. Join Predictions Back to Spatial Grid
+forecast_sf <- left_join(fishnet, dat21, by = "cell_id")
+
+# 15.4. Load Sensitive‐lands Overlays
+flood <- st_read("data/flood/fema_flood.shp", quiet = TRUE) %>%
+           st_transform(st_crs(forecast_sf))
+prot  <- st_read("data/padus/padus_az.shp", quiet = TRUE) %>%
+           st_transform(st_crs(forecast_sf))
+
+# 15.5. Flag Risk Overlap
+forecast_sf <- forecast_sf %>%
+  mutate(
+    flood_risk = (pred31 == "1") & lengths(st_intersects(geometry, flood)) > 0,
+    prot_risk  = (pred31 == "1") & lengths(st_intersects(geometry, prot))  > 0
   )
-kable(risk_sum)
-# Map
+
+# 15.6. Summarize Risk Among Predicted Developments
+risk_sum <- forecast_sf %>%
+  filter(pred31 == "1") %>%
+  st_drop_geometry() %>%
+  summarize(
+    total_cells = n(),
+    pct_flood   = mean(flood_risk) * 100,
+    pct_prot    = mean(prot_risk)  * 100
+  )
+knitr::kable(risk_sum, digits = 1,
+             caption = "2031 Forecast: Percent of Predicted Cells at Risk")
+
+# 15.7. Map the 2031 Forecast
+library(ggplot2)
 ggplot(forecast_sf) +
-  geom_sf(aes(fill=pred31), color=NA) +
-  geom_sf(data=phx_msa, fill=NA) +
-  labs(title="Projected 2031 Development") +
+  geom_sf(aes(fill = pred31), color = NA) +
+  geom_sf(data = phx_msa, fill = NA) +
+  scale_fill_manual(
+    values = c("0" = "grey80", "1" = "darkgreen"),
+    labels = c("No Dev", "Developed"),
+    name   = "2031 Dev"
+  ) +
+  labs(
+    title = "Projected 2031 Development in Phoenix MSA",
+    subtitle = glue::glue("Threshold = {threshold * 100}%"),
+    caption  = "Light‐rail extension scenario"
+  ) +
   theme_void()
 ```
+> 1. **Map** of cells predicted to develop by 2031.  
+> 2. **Table** showing `% in floodplain` and `% in protected areas`.  
+> 3. **Narrative** tying these numbers to your three key recommendations.
+
 
 # Recommendations
 
