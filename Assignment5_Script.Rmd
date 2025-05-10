@@ -152,24 +152,7 @@ dev_change[dev_change != 1] <- NA
 ```{r fishnet}
 grid_res <- res(lc1_rs)[1] #cell size
 
-# 1. Generate a uniform grid covering the MSA extent
-grid      <- st_make_grid(
-  phx_msa,
-  cellsize = grid_res,
-  square   = TRUE
-)
 
-# 2. Convert to an sf object so we can manipulate it
-grid_sf   <- st_sf(grid)
-
-# 3. Clip the grid to the exact MSA boundary (intersection)
-grid_clipped <- st_intersection(grid_sf, phx_msa)
-
-# 4. Add a unique ID for each cell to facilitate joins
-after_clip <- grid_clipped %>% mutate(cell_id = row_number())
-
-# Assign to 'fishnet'
-fishnet  <- after_clip
 
 fishnet <- st_make_grid(phx_msa, cellsize=grid_res, square=TRUE) %>%
   st_sf() %>% st_intersection(phx_msa) %>%
