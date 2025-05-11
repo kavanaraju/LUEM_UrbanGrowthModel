@@ -98,7 +98,7 @@ We first load the MSA boundary and NLCD land cover for 2011/2021, reclassify to 
 phx_msa <- st_read("data/Phoenix_MSA/Phoenix_MSA.shp", quiet=TRUE) %>%
   st_transform(26912)  # NAD83 / Arizona Central
 
-# Load NLCDrasters
+# Load NLCD land-cover rasters
 lc_2011 <- raster("data/Annual_NLCD_LndCov_2011_CU_C1V0.tif")  
 lc_2021 <- raster("data/Annual_NLCD_LndCov_2021_CU_C1V0.tif")
 
