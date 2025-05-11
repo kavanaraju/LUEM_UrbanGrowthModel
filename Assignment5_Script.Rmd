@@ -534,7 +534,7 @@ model_coefs <- tidy(model) %>%
     OR_2.5 = exp(estimate - 1.96 * std.error),
     OR_97.5 = exp(estimate + 1.96 * std.error)
   ) %>%
-  select(term, estimate, std.error, statistic, p.value, OR, OR_2.5, OR_97.5)
+  dplyr::select(term, estimate, std.error, statistic, p.value, OR, OR_2.5, OR_97.5)
 
 # Pretty table
 knitr::kable(
