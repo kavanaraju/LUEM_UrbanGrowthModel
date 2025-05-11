@@ -1,14 +1,23 @@
 ---
-# CPLN 6750 – Phoenix Urban Growth Forecast, 2031
-
-**To:** **Joshua Bednarek**  
-
-**From:** **Sravya Dandamudi & Kavana Raju**
-
-**Date:** **5/10/2025** 
-
-**Subject:** **Spatial Forecast of the Phoenix MSA for 2031**
+title: "CPLN 6750 – Phoenix Urban Growth Forecast, 2031"
+author:
+  - "Sravya Dandamudi"
+  - "Kavana Raju"
+date: "5/10/2025"
+output:
+  html_document:
+    theme: flatly
+    highlight: tango
+    toc: true
+    toc_float: true
+    code_folding: hide
+    code_download: yes
 ---
+
+**To:** Joshua Bednarek  
+**From:** Sravya Dandamudi & Kavana Raju  
+**Date:** May 10, 2025  
+**Subject:** Spatial Forecast of the Phoenix MSA for 2031
 
 # Objective 
 
@@ -429,8 +438,7 @@ base_lc1 <- fishnet_lc1 %>%
 # ─────────────────────────────────────────────────────────────────────────────
 fishnet_df <- fishnet %>%
   st_drop_geometry() %>%
-  rename(dist_hwy = dist_lr_existing) %>%
-  dplyr::select(cell_id, development_change, county, dist_hwy, dist_new, lagDev1)
+  dplyr::select(cell_id, development_change, county, dist_lr_existing, dist_new, lagDev1)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. Assemble the 2011 training dataset
@@ -476,7 +484,7 @@ prop.table(table(test$development_change))
 # 14.2. Fit the Logistic Regression Model
 model <- glm(
   development_change ~ 
-    dist_hwy + dist_new + lagDev1 +
+    dist_lr_existing + dist_new + lagDev1 +
     pop11  + inc11   + house11 +
     dev1   + forest1 + farm1   + oth1   +
     county,
@@ -526,7 +534,20 @@ cat("Test‐set AUC =", round(auc_val, 3), "\n")
 
 ```{r forecast}
 
-# 15A. Build trimmed 2021 census table with matching cell_id
+# 15A. Build the raw t2 feature table (from fishnet_lc2, fishnet, fishnet_pop21) ---
+
+# 1. LC flags
+lc2_df <- fishnet_lc2 %>%
+  st_drop_geometry() %>%
+  dplyr::select(cell_id, dev2, forest2, farm2, wet2, oth2)
+
+# 2. Infra, lag, county
+feat2_df <- fishnet %>%
+  st_drop_geometry() %>%
+  rename(dist_hwy = dist_lr_existing) %>%    # keep same name as in t1 compile
+  dplyr::select(cell_id, dist_hwy, dist_new, lagDev2, county)
+
+# 3. Census via spatial join (one-to-one to fishnet)
 pop21_df <- fishnet_pop21 %>%
   st_centroid() %>%
   st_join(dplyr::select(fishnet, cell_id), join = st_within) %>%
@@ -534,81 +555,74 @@ pop21_df <- fishnet_pop21 %>%
   dplyr::select(cell_id, pop21, inc21, house21) %>%
   distinct(cell_id, .keep_all = TRUE)
 
-# 15B. Assemble dat21: LC flags, infra+lag, census
-lc2_df   <- fishnet_lc2 %>%
-  st_drop_geometry() %>%
-  dplyr::select(cell_id, dev2, forest2, farm2, wet2, oth2)
-
-feat2_df <- fishnet %>%
-  st_drop_geometry() %>%
-  rename(dist_hwy = dist_lr_existing) %>%
-  dplyr::select(cell_id, dist_hwy, dist_new, lagDev2, county)
-
+# 4. Left‐join all and filter water
 dat21 <- lc2_df %>%
   left_join(feat2_df, by = "cell_id") %>%
   left_join(pop21_df,  by = "cell_id") %>%
   filter(wet2 == 0)
 
+# --- 15B. Rename to match t1 variable names exactly ---
+
+dat21 <- dat21 %>%
+  rename(
+    lagDev1  = lagDev2,   # model expects lagDev1
+    pop11    = pop21,     
+    inc11    = inc21,
+    house11  = house21,
+    dev1     = dev2,      # model uses dev1, forest1, farm1, oth1
+    forest1  = forest2,
+    farm1    = farm2,
+    oth1     = oth2,
+    dist_lr_existing = dist_hwy  # if your model uses dist_lr_existing
+  )
+
+# Drop the old t2-named cols to avoid confusion
+dat21 <- dat21 %>% dplyr::select(
+  cell_id,
+  dist_lr_existing, dist_new, lagDev1,
+  pop11, inc11, house11,
+  dev1, forest1, farm1, oth1,
+  county
+)
+
 # 15C. Impute any remaining NAs
 dat21 <- dat21 %>%
   mutate(
-    pop21   = replace_na(pop21,   0),
-    house21 = replace_na(house21, 0),
-    inc21   = replace_na(inc21,   median(inc21, na.rm = TRUE))
+    pop11   = replace_na(pop11,   0),
+    house11 = replace_na(house11, 0),
+    inc11   = replace_na(inc11,   median(inc11, na.rm=TRUE))
   )
 
-# Check no more NAs
+# Verify zero NAs
 cat("NAs in dat21:", sum(is.na(dat21)), "\n")
 
-# 15D. Predict probabilities & binary outcome
+# --- 15D. Predict 2031 Development ---
+
 dat21$prob31 <- predict(model, dat21, type = "response")
-threshold     <- 0.10
+
+threshold <- 0.10
 dat21$pred31 <- factor(
   ifelse(dat21$prob31 > threshold, "1", "0"),
   levels = c("0","1")
 )
 
-# 15E. Join back to spatial fishnet
+# --- 15E. Join back to fishnet and assess risk ---
+
 forecast_sf <- left_join(fishnet, dat21, by = "cell_id")
 
-# 15F. Load and transform sensitive‐lands layers
-flood <- st_read("data/flood/fema_flood.shp", quiet = TRUE) %>%
-           st_transform(st_crs(forecast_sf))
-prot  <- st_read("data/padus/padus_az.shp",   quiet = TRUE) %>%
-           st_transform(st_crs(forecast_sf))
 
-# 15G. Flag risk overlaps
-forecast_sf <- forecast_sf %>%
-  mutate(
-    flood_risk = (pred31 == "1") & (lengths(st_intersects(geometry, flood)) > 0),
-    prot_risk  = (pred31 == "1") & (lengths(st_intersects(geometry, prot))  > 0)
-  )
-
-# 15H. Summarize risk among predicted developments
-risk_sum <- forecast_sf %>%
-  filter(pred31 == "1") %>%
-  st_drop_geometry() %>%
-  summarize(
-    total_cells = n(),
-    pct_flood   = mean(flood_risk) * 100,
-    pct_prot    = mean(prot_risk)  * 100
-  )
-knitr::kable(risk_sum, digits = 1,
-             caption = "Percent of Predicted 2031 Cells at Risk")
-
-# 15I. Map the 2031 forecast
+# 15F. Map the forecast
 ggplot(forecast_sf) +
-  geom_sf(aes(fill = pred31), color = NA) +
-  geom_sf(data = phx_msa, fill = NA) +
+  geom_sf(aes(fill=pred31), color=NA) +
+  geom_sf(data=phx_msa, fill=NA) +
   scale_fill_manual(
-    values = c("0" = "grey80", "1" = "darkgreen"),
-    labels = c("No Dev", "Developed"),
-    name   = "2031 Dev"
+    values=c("0"="grey80","1"="darkgreen"),
+    labels=c("No Dev","Developed"),
+    name="2031 Dev"
   ) +
   labs(
-    title    = "Projected 2031 Development in Phoenix MSA",
-    subtitle = glue::glue("Threshold = {threshold * 100}%"),
-    caption  = "Scenario: New light-rail extension"
+    title="Projected 2031 Development",
+    subtitle=glue::glue("Threshold = {threshold*100}%")
   ) +
   theme_void()
 
@@ -617,12 +631,66 @@ ggplot(forecast_sf) +
 > 2. **Table** showing `% in floodplain` and `% in protected areas`.  
 > 3. **Narrative** tying these numbers to your three key recommendations.
 
+```{r impact-assessment, warning=FALSE, message=FALSE}
+gdb_path <- "data/Protected Areas/PADUS4_1_StateAZ.gdb"
+st_layers(gdb_path)
+
+# 2. Read the Fee‐simple layer (clean multipolygons only)
+prot_fee <- st_read(
+  dsn   = gdb_path,
+  layer = "PADUS4_1Fee_State_AZ",   # simpler, pure multipolygon layer
+  quiet = TRUE
+)
+
+# 3. Drop any Z/M dims and ensure POLYGON/MULTIPOLYGON
+prot <- prot_fee %>%
+  st_zm(drop = TRUE, what = "ZM") %>%    # strip Z/M
+  st_cast("MULTIPOLYGON") %>%            # force to standard multipolygons
+  st_transform(st_crs(forecast_sf))      # into your model CRS
+
+
+# 4. Flag protected‐area risk
+# 1. One-time spatial intersection call
+ix <- st_intersects(forecast_sf, prot)
+
+# 2. Logical vector: does each cell touch protected area?
+touches_prot <- lengths(ix) > 0
+
+# 3. Add prot_risk in two quick steps
+forecast_sf$prot_risk <- (forecast_sf$pred31 == "1") & touches_prot
+
+# 5. Summarize
+risk_sum <- forecast_sf %>%
+  filter(pred31 == "1") %>%
+  st_drop_geometry() %>%
+  summarize(
+    total_cells = n(),
+    pct_prot    = mean(prot_risk) * 100
+  )
+knitr::kable(risk_sum, digits = 1,
+             caption = "Percent of 2031‐Predicted Cells in Fee‐Simple Protected Areas")
+
+# 5. Map
+ggplot(forecast_sf) +
+  geom_sf(aes(fill = pred31), color = NA) +
+  geom_sf(data = prot, colour = "darkgreen", fill = NA, size = 0.3) +
+  geom_sf(data = phx_msa, fill = NA, colour = "black") +
+  scale_fill_manual(
+    values = c("0" = "grey80", "1" = "darkgreen"),
+    labels = c("No Dev","Developed"),
+    name   = "2031 Dev"
+  ) +
+  labs(
+    title    = "Projected 2031 Development & Protected Areas",
+    subtitle = glue::glue("Threshold = {threshold * 100}%")
+  ) +
+  theme_void()
+```
 
 # Recommendations
 
-1. Strengthen floodplain regulations where > `r round(risk_sum$pct_flood,1)`% expansion occurs in flood zones.  
-2. Establish green buffers around protected lands given ~`r round(risk_sum$pct_prot,1)`% overlap.  
-3. Incentivize infill and higher density within 0.5 mi of the new corridor to curb leapfrog sprawl.
+1. Establish green buffers around protected lands given ~`r round(risk_sum$pct_prot,1)`% overlap.  
+2. Incentivize infill and higher density within 0.5 mi of the new corridor to curb leapfrog sprawl.
 
 ---
 
