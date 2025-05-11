@@ -24,9 +24,9 @@ knitr:
 **Date:** May 10, 2025  
 **Subject:** Spatial Forecast of the Phoenix MSA for 2031
 
-# Objective 
+# 1. Objective 
 
-Phoenix’s Planning and Development Department has started talking about creating the next comprehensive plan to ensure that the city has the proper guidance and information to invest in its future. To inform their decision-making, since comprehensive plans are looking at multiple different aspects of the city including the environment, economy, transportation, housing, etc, it is important to think about what land uses will look like in 2031. Phoenix has a new proposed light rail extension, so we looked at how this addition affects the way land is developed since it has a significant effect in how people move and what they able to access which would affect how land is developed. We looked at how different variables affected land use between 2011-2021 and then used those findings to see how land use would change for 2031.
+Phoenix’s Planning and Development Department needs a data-driven projection of urban growth to inform the next comprehensive plan. We examine how proximity to existing and a proposed northwest light-rail extension shaped development from 2011–2021, build a logistic regression model, and then forecast where new development is most likely by 2031 under the extension scenario. This supports targeted growth management and conservation.
 
 ```{r setup, include=FALSE}
 # Load packages
@@ -89,32 +89,15 @@ aggregateRaster <- function(inputRasterList, fishnet) {
 }
 ```
 
-# 1. Introduction
+# 2. Exploratory Analysis
 
-This report builds a spatial logistic regression model of urban development in the Phoenix–Mesa–Scottsdale MSA, using land cover change from 2011 to 2021 as training data. We then forecast development to 2031 under a scenario where a new transportation corridor is introduced. Finally, we assess where sensitive lands (flood zones, protected areas) are at risk and propose planning recommendations.
+We first load the MSA boundary and NLCD land cover for 2011/2021, reclassify to “developed” (21–24), and visualize.
 
-# 2. Workflow Overview
-
-1. Import and preprocess land cover rasters (2011, 2021)  
-2. Reclassify to developed/undeveloped and derive change raster  
-3. Build a fishnet grid and aggregate raster and vector features to each cell  
-4. Engineer predictors: distance to roads, spatial lag, census variables, slope  
-5. Train logistic regression model (2011→2021) and validate  
-6. Forecast to 2031 using 2021 inputs + extension scenario  
-7. Assess impacts on sensitive lands  
-8. Key recommendations
-
-# 3. Study Area Boundary
-
-```{r load-boundary}
+```{r load-boundary-nlcd}
 # Load Boundary for Phoenix
 phx_msa <- st_read("data/Phoenix_MSA/Phoenix_MSA.shp", quiet=TRUE) %>%
   st_transform(26912)  # NAD83 / Arizona Central
-```
 
-# 4. Load Land Cover Data (NLCD)
-
-```{r load-nlcd}
 # Load NLCDrasters
 lc_2011 <- raster("data/Annual_NLCD_LndCov_2011_CU_C1V0.tif")  
 lc_2021 <- raster("data/Annual_NLCD_LndCov_2021_CU_C1V0.tif")
@@ -132,7 +115,16 @@ lc_2021 <- mask(lc_2021, phx_msa_r)
 # Reproject masked rasters back to study CRS
 lc_2011 <- projectRaster(lc_2011, crs = 26912)
 lc_2021 <- projectRaster(lc_2021, crs = 26912)
+
+# Reclassify developed classes (NLCD 21–24)
+rc <- matrix(c(0,12,0, 12,24,1, 24,Inf,0), ncol=3, byrow=TRUE)
+dev1 <- reclassify(lc1_rs, rc)
+dev2 <- reclassify(lc2_rs, rc)
+
+plot(dev2, main="2021 Developed Land (NLCD 21–24)")
 ```
+
+Figure 1. Developed land footprint in 2021.
 
 ```{r save-lc}
 writeRaster(
@@ -148,7 +140,9 @@ writeRaster(
   overwrite = TRUE)
 ```
 
-# 5. Detecting Land Cover Conversion
+# 3. Land Cover Conversion (2011→2021)
+
+We detect cells converting from undeveloped to developed.
 
 ```{r detect-change}
 # Resample to 300m (To capture finer details as we're analyzing the extension - TOD)
@@ -158,24 +152,21 @@ lc2_rs <- aggregate(lc_2021, fact=10, fun="modal")
 # Align origins, resolution, and extent
 lc2_rs <- resample(lc2_rs, lc1_rs, method="ngb")
 
-# Reclassify developed classes (NLCD 21–24)
-rc <- matrix(c(0,12,0, 12,24,1, 24,Inf,0), ncol=3, byrow=TRUE)
-dev1 <- reclassify(lc1_rs, rc)
-dev2 <- reclassify(lc2_rs, rc)
-
 # Map algebra: 1 = change from undeveloped to developed
-# dev1=0 & dev2=1 => converted; dev1=1 & dev2=0 => unlikely here
 dev_change <- dev1 + dev2
 # Keep only converted cells
 dev_change[dev_change != 1] <- NA
+
+plot(dev_change, main="Converted to Developed (2011–2021)")
 ```
 
-# 6. Creating the Fishnet Grid
+# 4. Fishnet Grid & Raster Aggregation
 
-```{r fishnet}
+Create a 300 m fishnet and aggregate land-cover flags.
+
+```{r fishnet-raster-join}
 grid_res <- res(lc1_rs)[1] #cell size
 
-#For Faster Processing as the Cell Size is Small
 # 1. Build the full grid over the MSA bounding box only
 bbox      <- st_bbox(phx_msa)
 grid_full <- st_make_grid(
@@ -185,9 +176,7 @@ grid_full <- st_make_grid(
   offset   = c(bbox$xmin, bbox$ymin),
   n        = c(
     ceiling((bbox$xmax - bbox$xmin) / grid_res),
-    ceiling((bbox$ymax - bbox$ymin) / grid_res)
-  )
-)
+    ceiling((bbox$ymax - bbox$ymin) / grid_res)))
 
 # 2. Convert to sf
 grid_sf   <- st_sf(grid = grid_full)
@@ -201,11 +190,7 @@ fishnet   <- grid_sf[inside, ]
 
 # 5. Assign unique IDs
 fishnet <- fishnet %>% mutate(cell_id = row_number())
-```
 
-# 7. Join Raster Change to Fishnet
-
-```{r join-change}
 # Convert the change raster to points
 pts_change <- rasterToPoints(dev_change) %>% 
   as.data.frame() %>% 
@@ -215,13 +200,9 @@ pts_change <- rasterToPoints(dev_change) %>%
 fishnet <- aggregate(pts_change, fishnet, FUN = sum) %>%
   mutate(development_change = factor(ifelse(layer > 0, 1, 0))) %>%
   dplyr::select(-layer)
-```
 
-# 8. Aggregating Land Cover Categories
-```{r}
-library(terra)
-library(raster)
-library(dplyr)
+
+#Aggregating Land Cover Categories
 
 # 0. Ensure 'cell_id' exists on fishnet
 if (!"cell_id" %in% names(fishnet)) {
@@ -234,6 +215,16 @@ sv <- terra::vect(fishnet)
 # ---- 2011 land-cover categories ----
 
 # 2. Build SpatRaster stack of your 2011 binaries
+# collect 2011 binaries into a list
+rasters1 <- list(
+  dev1    = dev1,
+  forest1 = forest1,
+  farm1   = farm1,
+  wet1    = wet1,
+  oth1    = oth1,
+  water1  = water1
+)
+
 stack1 <- raster::stack(rasters1)   # RasterStack of dev1, forest1, etc.
 s1      <- terra::rast(stack1)      # now a SpatRaster; names already correct
 
@@ -255,6 +246,14 @@ fishnet_lc1 <- fishnet %>%
 # ---- 2021 land-cover categories ----
 
 # 6. Build SpatRaster stack of your 2021 binaries
+# collect 2021 binaries into a list
+rasters2 <- list(
+  dev2    = dev2,
+  forest2 = forest2,
+  farm2   = farm2,
+  wet2    = wet2,
+  oth2    = oth2)
+
 stack2 <- raster::stack(rasters2)
 s2      <- terra::rast(stack2)      # names carry over from rasters2
 
@@ -271,7 +270,9 @@ fishnet_lc2 <- fishnet %>%
 
 ```
 
-# 9. Population & Socioeconomic Data via tidycensus
+# 5. Census & Infrastructure Predictors
+
+We interpolate 2011/2021 tract pop, income, housing to grid and compute distances.
 
 ```{r census}
 census_api_key("52f0462d8b4e1e19ee64b25a3196677c5e32e660", install=FALSE)
@@ -331,11 +332,9 @@ fishnet_pop21 <- st_interpolate_aw(
   fishnet,
   extensive = TRUE
 )
-```
 
-# 10. Transportation & Infrastructure Features
+#Transportation & Infrastructure Features
 
-```{r transport}
 # Load existing light rail network
 existing_lr <- st_read("data/LightRail_Existing/LightRail_Existing.shp")
 
@@ -352,11 +351,7 @@ new_lr <- st_read("data/LightRail_Extension/LightRail_Extension.shp")
 new_lr <- st_transform(new_lr, st_crs(fishnet))
 
 fishnet$dist_new <- as.numeric(st_distance(centroids, new_lr))
-```
 
-# 11. Spatial Lag of Development
-
-```{r spatial-lag}
 # Compute centroids once
 centroids <- st_centroid(fishnet)
 # Matrix of fishnet centroid coordinates
@@ -385,17 +380,15 @@ fishnet <- fishnet %>%
     lagDev1 = grid_lag1,
     lagDev2 = grid_lag2
   )
-```
 
-# 12. County Fixed Effects
-
-```{r county-fe}
 cts <- counties(state="AZ", cb=TRUE) %>% st_transform(st_crs(fishnet)) %>%
   filter(NAME %in% c("Maricopa","Pinal"))
 fishnet <- fishnet %>% st_join(cts["NAME"]) %>% rename(county=NAME)
 ```
 
-# 13. Compile Modeling Data Sets
+# 6. Model Training & Validation
+
+Assemble 2011 predictors and fit logistic regression.
 
 ```{r compile}
 # ─────────────────────────────────────────────────────────────────────────────
@@ -451,11 +444,7 @@ dat11 <- dat11 %>%
 # sanity check
 table(dat11$development_change)
 colSums(is.na(dat11))
-```
 
-# 14. Model Training & Validation
-
-```{r modeling}
 set.seed(2025)
 train_i <- caret::createDataPartition(
   y    = dat11$development_change,
@@ -496,7 +485,17 @@ cm <- caret::confusionMatrix(
   positive = "1"
 )
 print(cm)
+```
 
+Table 1. Model summary (see summary(model)).
+Table 2. Confusion matrix (threshold=0.10): Sensitivity=r cm$byClass["Sensitivity"], Specificity=r cm$byClass["Specificity"].
+Figure 2. ROC (AUC=r round(auc_val,2)).
+
+> - **Coefficients:** signs, significance, and e^(β) for interpretation  
+> - **Confusion matrix:** accuracy, sensitivity (TPR), specificity (TNR) at your chosen threshold  
+> - **AUC** from the ROC (should be ≥ 0.7 for a useful model)
+
+```{r plot-roc}
 # 14.5. ROC Curve & AUC
 library(plotROC)
 roc_df <- data.frame(
@@ -513,12 +512,9 @@ auc_val <- roc_auc_vec(test$development_change, test$prob)
 cat("Test‐set AUC =", round(auc_val, 3), "\n")
 ```
 
-> **To Report:**  
-> - **Coefficients:** signs, significance, and e^(β) for interpretation  
-> - **Confusion matrix:** accuracy, sensitivity (TPR), specificity (TNR) at your chosen threshold  
-> - **AUC** from the ROC (should be ≥ 0.7 for a useful model)
+# 7. Forecast to 2031 & Impact Assessment
 
-# 15. Forecast to 2031 & Impact Assessment
+Apply model to 2021 inputs + new corridor, map projected development, and assess risk.
 
 ```{r forecast}
 
@@ -680,10 +676,8 @@ save.image(file = "data/my_workspace.RData")
 load("data/my_workspace.RData")
 ```
 
-# Recommendations
+# 8. Key Recommendations
 
-1. Establish green buffers around protected lands given ~`r round(risk_sum$pct_prot,1)`% overlap.  
-2. Incentivize infill and higher density within 0.5 mi of the new corridor to curb leapfrog sprawl.
 
 ---
 
