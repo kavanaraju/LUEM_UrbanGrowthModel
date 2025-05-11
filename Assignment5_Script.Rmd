@@ -10,8 +10,13 @@ output:
     highlight: tango
     toc: true
     toc_float: true
-    code_folding: hide
+    code_folding: hide    
     code_download: yes
+knitr:
+  opts_chunk:
+    echo: true           
+    warning: false  
+    message: false
 ---
 
 **To:** Joshua Bednarek  
@@ -24,16 +29,6 @@ output:
 Phoenix’s Planning and Development Department has started talking about creating the next comprehensive plan to ensure that the city has the proper guidance and information to invest in its future. To inform their decision-making, since comprehensive plans are looking at multiple different aspects of the city including the environment, economy, transportation, housing, etc, it is important to think about what land uses will look like in 2031. Phoenix has a new proposed light rail extension, so we looked at how this addition affects the way land is developed since it has a significant effect in how people move and what they able to access which would affect how land is developed. We looked at how different variables affected land use between 2011-2021 and then used those findings to see how land use would change for 2031.
 
 ```{r setup, include=FALSE}
-# -----------------------------------
-# 0. SETUP
-# -----------------------------------
-knitr::opts_chunk$set(
-  echo = TRUE,
-  warning = FALSE,
-  message = FALSE,
-  fig.width = 8,
-  fig.height = 5
-)
 # Load packages
 pkgs <- c(
   "tidyverse","sf","raster","terra","exactextractr",
@@ -43,7 +38,7 @@ pkgs <- c(
 lapply(pkgs, function(p) if(!requireNamespace(p,quietly=TRUE)) install.packages(p))
 lapply(pkgs, library, character.only=TRUE)
 
-# Custom helper functions (from example)
+# Custom helper functions (from class exercise)
 quintileBreaks <- function(df, variable) {
   as.character(quantile(df[[variable]], c(.01,.2,.4,.6,.8), na.rm=TRUE))
 }
@@ -105,14 +100,14 @@ This report builds a spatial logistic regression model of urban development in t
 3. Build a fishnet grid and aggregate raster and vector features to each cell  
 4. Engineer predictors: distance to roads, spatial lag, census variables, slope  
 5. Train logistic regression model (2011→2021) and validate  
-6. Forecast to 2031 using 2021 inputs + new infrastructure scenario  
+6. Forecast to 2031 using 2021 inputs + extension scenario  
 7. Assess impacts on sensitive lands  
-8. Provide three key recommendations
+8. Key recommendations
 
 # 3. Study Area Boundary
 
 ```{r load-boundary}
-# Load Boundary for Phoem
+# Load Boundary for Phoenix
 phx_msa <- st_read("data/Phoenix_MSA/Phoenix_MSA.shp", quiet=TRUE) %>%
   st_transform(26912)  # NAD83 / Arizona Central
 ```
@@ -221,13 +216,6 @@ fishnet <- aggregate(pts_change, fishnet, FUN = sum) %>%
   mutate(development_change = factor(ifelse(layer > 0, 1, 0))) %>%
   dplyr::select(-layer)
 ```
-
-```{r}
-save.image(file = "data/my_workspace.RData")
-
-load("data/my_workspace.RData")
-```
-
 
 # 8. Aggregating Land Cover Categories
 ```{r}
@@ -609,23 +597,6 @@ dat21$pred31 <- factor(
 # --- 15E. Join back to fishnet and assess risk ---
 
 forecast_sf <- left_join(fishnet, dat21, by = "cell_id")
-
-
-# 15F. Map the forecast
-ggplot(forecast_sf) +
-  geom_sf(aes(fill=pred31), color=NA) +
-  geom_sf(data=phx_msa, fill=NA) +
-  scale_fill_manual(
-    values=c("0"="grey80","1"="darkgreen"),
-    labels=c("No Dev","Developed"),
-    name="2031 Dev"
-  ) +
-  labs(
-    title="Projected 2031 Development",
-    subtitle=glue::glue("Threshold = {threshold*100}%")
-  ) +
-  theme_void()
-
 ```
 > 1. **Map** of cells predicted to develop by 2031.  
 > 2. **Table** showing `% in floodplain` and `% in protected areas`.  
@@ -670,21 +641,43 @@ risk_sum <- forecast_sf %>%
 knitr::kable(risk_sum, digits = 1,
              caption = "Percent of 2031‐Predicted Cells in Fee‐Simple Protected Areas")
 
-# 5. Map
-ggplot(forecast_sf) +
-  geom_sf(aes(fill = pred31), color = NA) +
-  geom_sf(data = prot, colour = "darkgreen", fill = NA, size = 0.3) +
-  geom_sf(data = phx_msa, fill = NA, colour = "black") +
+dev_area <- forecast_sf %>% 
+  filter(pred31 == "1") %>% 
+  st_union() %>% 
+  st_as_sf()
+
+ggplot() +
+  # 1. white background & crisp outline of study area
+  geom_sf(data = phx_msa, fill = "white", color = "black", size = 0.5) +
+  
+  # 2. plotted development forecast
+  geom_sf(data = dev_area, fill = "darkgreen", color = NA) +
+  
+  # 3. updated legend with no "NA" class
   scale_fill_manual(
-    values = c("0" = "grey80", "1" = "darkgreen"),
-    labels = c("No Dev","Developed"),
-    name   = "2031 Dev"
+    values       = c("0" = "grey80", "1" = "darkgreen"),
+    labels       = c("No Dev", "Developed"),
+    name         = "2031 Dev",
+    na.value     = "white",      # paint any missing cells white
+    na.translate = FALSE         # drop the “NA” entry from the legend
   ) +
+  
+  # 4. titles & clean theme
   labs(
-    title    = "Projected 2031 Development & Protected Areas",
-    subtitle = glue::glue("Threshold = {threshold * 100}%")
+    title    = "Projected 2031 Development",
+    subtitle = "Threshold = 10%"
   ) +
-  theme_void()
+  theme_void() +
+  theme(
+    plot.title    = element_text(hjust = 0.5, size = 16, face = "bold"),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.position = "right"
+  )
+```
+```{r}
+save.image(file = "data/my_workspace.RData")
+
+load("data/my_workspace.RData")
 ```
 
 # Recommendations
