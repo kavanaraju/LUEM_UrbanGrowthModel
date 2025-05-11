@@ -127,22 +127,14 @@ plot(dev2, main="2021 Developed Land (NLCD 21–24)")
 Figure 1. Developed land footprint in 2021.
 
 ```{r save-lc}
-writeRaster(
-  x         = lc_2011,
-  filename  = "data/LC_2011_PhoenixMSA",
-  filetype  = "GTiff",
-  overwrite = TRUE)
+#writeRaster(x         = lc_2011,filename  = "data/LC_2011_PhoenixMSA",filetype  = "GTiff",overwrite = TRUE)
 
-writeRaster(
-  x         = lc_2021,
-  filename  = "data/LC_2021_PhoenixMSA",
-  filetype  = "GTiff",
-  overwrite = TRUE)
+#writeRaster(x         = lc_2021,filename  = "data/LC_2021_PhoenixMSA",filetype  = "GTiff",overwrite = TRUE)
 ```
 
 # 3. Land Cover Conversion (2011→2021)
 
-We detect cells converting from undeveloped to developed.
+We detected cells converting from undeveloped to developed.
 
 ```{r detect-change}
 # Resample to 300m (To capture finer details as we're analyzing the extension - TOD)
@@ -162,7 +154,7 @@ plot(dev_change, main="Converted to Developed (2011–2021)")
 
 # 4. Fishnet Grid & Raster Aggregation
 
-Create a 300 m fishnet and aggregate land-cover flags.
+Next, we created a 300 m fishnet and aggregate land-cover flags.
 
 ```{r fishnet-raster-join}
 grid_res <- res(lc1_rs)[1] #cell size
@@ -272,7 +264,7 @@ fishnet_lc2 <- fishnet %>%
 
 # 5. Census & Infrastructure Predictors
 
-We interpolate 2011/2021 tract pop, income, housing to grid and compute distances.
+We interpolated 2011/2021 tract pop, income, housing to grid and compute distances.
 
 ```{r census}
 census_api_key("52f0462d8b4e1e19ee64b25a3196677c5e32e660", install=FALSE)
@@ -388,12 +380,10 @@ fishnet <- fishnet %>% st_join(cts["NAME"]) %>% rename(county=NAME)
 
 # 6. Model Training & Validation
 
-Assemble 2011 predictors and fit logistic regression.
+Next we assembled the 2011 predictors and fit the logistic regression.
 
 ```{r compile}
-# ─────────────────────────────────────────────────────────────────────────────
 # 0. Recompute and prepare the 2011 population/census table, ensuring one row per cell_id
-# ─────────────────────────────────────────────────────────────────────────────
 fishnet_pop11 <- st_interpolate_aw(
   acs11[c("pop11","inc11","house11")],
   fishnet,
@@ -406,24 +396,18 @@ pop11_df <- fishnet_pop11 %>%
   dplyr::select(cell_id, pop11, inc11, house11) %>%
   distinct(cell_id, .keep_all = TRUE)
 
-# ─────────────────────────────────────────────────────────────────────────────
 # 1. Land‐cover flags (base_lc1)
-# ─────────────────────────────────────────────────────────────────────────────
 base_lc1 <- fishnet_lc1 %>%
   st_drop_geometry() %>%
   dplyr::select(cell_id, dev1, forest1, farm1, wet1, oth1, water1) %>%
   distinct(cell_id, .keep_all = TRUE)
 
-# ─────────────────────────────────────────────────────────────────────────────
 # 2. Change + distance + lag + county
-# ─────────────────────────────────────────────────────────────────────────────
 fishnet_df <- fishnet %>%
   st_drop_geometry() %>%
   dplyr::select(cell_id, development_change, county, dist_lr_existing, dist_new, lagDev1)
 
-# ─────────────────────────────────────────────────────────────────────────────
 # 3. Assemble the 2011 training dataset
-# ─────────────────────────────────────────────────────────────────────────────
 dat11 <- base_lc1 %>%
   left_join(fishnet_df, by = "cell_id") %>%
   left_join(pop11_df,   by = "cell_id") %>%
@@ -458,7 +442,7 @@ test  <- dat11[-train_i, ]
 prop.table(table(train$development_change))
 prop.table(table(test$development_change))
 
-# 14.2. Fit the Logistic Regression Model
+# Fit the Logistic Regression Model
 model <- glm(
   development_change ~ 
     dist_lr_existing + dist_new + lagDev1 +
@@ -470,10 +454,10 @@ model <- glm(
 )
 summary(model)
 
-# 14.3. Predict on Test Set
+# Predict on Test Set
 test$prob <- predict(model, test, type = "response")
 
-# 14.4. Choose Threshold & Confusion Matrix
+# Choose Threshold & Confusion Matrix
 threshold <- 0.10
 test$pred_class <- factor(
   ifelse(test$prob > threshold, "1", "0"),
@@ -514,11 +498,11 @@ cat("Test‐set AUC =", round(auc_val, 3), "\n")
 
 # 7. Forecast to 2031 & Impact Assessment
 
-Apply model to 2021 inputs + new corridor, map projected development, and assess risk.
+We applied model to 2021 inputs and the proposed light rail extension, mapped the projected development, and assessed risk.
 
 ```{r forecast}
 
-# 15A. Build the raw t2 feature table (from fishnet_lc2, fishnet, fishnet_pop21) ---
+# A.Build the raw t2 feature table (from fishnet_lc2, fishnet, fishnet_pop21)
 
 # 1. LC flags
 lc2_df <- fishnet_lc2 %>%
@@ -545,7 +529,7 @@ dat21 <- lc2_df %>%
   left_join(pop21_df,  by = "cell_id") %>%
   filter(wet2 == 0)
 
-# --- 15B. Rename to match t1 variable names exactly ---
+# 5. Rename to match t1 variable names exactly ---
 
 dat21 <- dat21 %>%
   rename(
@@ -560,7 +544,7 @@ dat21 <- dat21 %>%
     dist_lr_existing = dist_hwy  # if your model uses dist_lr_existing
   )
 
-# Drop the old t2-named cols to avoid confusion
+# 6. Drop the old t2-named cols to avoid confusion
 dat21 <- dat21 %>% dplyr::select(
   cell_id,
   dist_lr_existing, dist_new, lagDev1,
@@ -569,7 +553,7 @@ dat21 <- dat21 %>% dplyr::select(
   county
 )
 
-# 15C. Impute any remaining NAs
+# 7. Impute any remaining NAs
 dat21 <- dat21 %>%
   mutate(
     pop11   = replace_na(pop11,   0),
@@ -580,7 +564,7 @@ dat21 <- dat21 %>%
 # Verify zero NAs
 cat("NAs in dat21:", sum(is.na(dat21)), "\n")
 
-# --- 15D. Predict 2031 Development ---
+# 8. Predict 2031 Development ---
 
 dat21$prob31 <- predict(model, dat21, type = "response")
 
@@ -590,7 +574,7 @@ dat21$pred31 <- factor(
   levels = c("0","1")
 )
 
-# --- 15E. Join back to fishnet and assess risk ---
+# 9. Join back to fishnet and assess risk ---
 
 forecast_sf <- left_join(fishnet, dat21, by = "cell_id")
 ```
@@ -671,14 +655,18 @@ ggplot() +
   )
 ```
 ```{r}
-save.image(file = "data/my_workspace.RData")
+#save.image(file = "data/my_workspace.RData")
 
-load("data/my_workspace.RData")
+#load("data/my_workspace.RData")
 ```
 
 # 8. Key Recommendations
 
+1. Establish 100 m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
 
+2. Incentivize TOD infill through density bonuses and fast-track permitting within 0.5 mi of the new extension to align with projected +8 % population growth by 2031.
+
+3. Coordinate infrastructure timing with forecasted development areas to optimize station placement and minimize leapfrog sprawl. Establish 100 m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
 ---
 
 <small>Adapted from Houston Urban Growth Modeling example (Fichman et al.).</small>
