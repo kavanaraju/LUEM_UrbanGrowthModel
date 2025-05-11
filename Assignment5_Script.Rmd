@@ -26,7 +26,7 @@ knitr:
 
 # 1. Objective 
 
-Phoenix’s Planning and Development Department needs a data-driven projection of urban growth to inform the next comprehensive plan. We examine how proximity to existing and a proposed northwest light-rail extension shaped development from 2011–2021, build a logistic regression model, and then forecast where new development is most likely by 2031 under the extension scenario. This supports targeted growth management and conservation.
+Phoenix’s Planning and Development Department has started talking about creating the next comprehensive plan to ensure that the city has the proper guidance and information to invest in its future. To inform their decision-making, since comprehensive plans are looking at multiple different aspects of the city including the environment, economy, transportation, housing, etc, it is important to think about what land uses will look like in 2031. Phoenix has a new proposed light rail extension, so we looked at how this addition affects the way land is developed since it has a significant effect in how people move and what they able to access which would affect how land is developed. We looked at how different variables affected land use between 2011-2021 and then used those findings to see how land use would change for 2031.  
 
 ```{r setup, include=FALSE}
 # Load packages
@@ -89,7 +89,7 @@ aggregateRaster <- function(inputRasterList, fishnet) {
 }
 ```
 
-# 2. Exploratory Analysis
+# 2. Current Land-Cover & Predictor Exploration
 
 We first load the MSA boundary and NLCD land cover for 2011/2021, reclassify to “developed” (21–24), and visualize.
 
@@ -119,7 +119,9 @@ Figure 1. Developed land footprint in 2021.
 #writeRaster(x         = lc_2021,filename  = "data/LC_2021_PhoenixMSA",filetype  = "GTiff",overwrite = TRUE)
 ```
 
-# 3. Land Cover Conversion (2011→2021)
+# 	3. Feature Engineering
+
+## 3.1. Change Detection & Binaries
 
 We detected cells converting from undeveloped to developed.
 
@@ -219,7 +221,7 @@ water2  <- reclassify(dev2_rs_aligned, matrix(c(
 oth2 <- (1 - dev2_rs_aligned) * (1 - forest2) * (1 - farm2) * (1 - wet2) * (1 - water2)
 ```
 
-# 4. Fishnet Grid & Raster Aggregation
+## 	3.2 Grid Aggregation
 
 Next, we created a 300 m fishnet and aggregate land-cover flags.
 
@@ -308,7 +310,7 @@ fishnet_lc2 <- fishnet %>%
 ```
 
 
-# 5. Census & Infrastructure Predictors
+## 3.3 Socioeconomic & Transit
 
 We interpolated 2011/2021 tract pop, income, housing to grid and compute distances.
 
@@ -424,7 +426,7 @@ cts <- counties(state="AZ", cb=TRUE) %>% st_transform(st_crs(fishnet)) %>%
 fishnet <- fishnet %>% st_join(cts["NAME"]) %>% rename(county=NAME)
 ```
 
-# 6. Model Training & Validation
+# 4. Model Results & Validation
 
 Next we assembled the 2011 predictors and fit the logistic regression.
 
@@ -542,7 +544,7 @@ auc_val <- roc_auc_vec(test$development_change, test$prob)
 cat("Test‐set AUC =", round(auc_val, 3), "\n")
 ```
 
-# 7. Forecast to 2031 & Impact Assessment
+# 5. 2031 Forecast & Impact Assessment
 
 We applied model to 2021 inputs and the proposed light rail extension, mapped the projected development, and assessed risk.
 
@@ -707,13 +709,14 @@ ggplot() +
 #load("data/my_workspace.RData")
 ```
 
-# 8. Key Recommendations
+# 6. Planning Recommendations
 
 1. Establish 100m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
 
 2. Incentivize TOD infill through density bonuses and fast-track permitting within 0.5mi of the new extension to align with projected +8% population growth by 2031.
 
 3. Coordinate infrastructure timing with forecasted development areas to optimize station placement and minimize leapfrog sprawl. Establish 100m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
+
 ---
 
 <small>Adapted from Houston Urban Growth Modeling example (Fichman et al.).</small>
