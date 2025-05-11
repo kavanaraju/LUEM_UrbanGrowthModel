@@ -39,6 +39,22 @@ pkgs <- c(
 lapply(pkgs, function(p) if(!requireNamespace(p,quietly=TRUE)) install.packages(p))
 lapply(pkgs, library, character.only=TRUE)
 
+suppressPackageStartupMessages({
+  library(tidyverse); library(sf); library(raster); library(terra)
+  library(exactextractr); library(tidycensus); library(tigris)
+  library(FNN); library(caret); library(yardstick); library(plotROC)
+  library(kableExtra); library(mapview); library(FedData)
+})
+
+# turn off dplyr progress bars
+options(dplyr.show_progress = FALSE)
+
+# turn off tigris progress bars (used by tidycensus internally)
+options(tigris.progress_bar = FALSE)
+
+# turn off general cli progress
+options(cli.progress = FALSE)
+
 # Custom helper functions (from class exercise)
 quintileBreaks <- function(df, variable) {
   as.character(quantile(df[[variable]], c(.01,.2,.4,.6,.8), na.rm=TRUE))
@@ -398,6 +414,7 @@ centroids <- st_centroid(fishnet)
 # Matrix of fishnet centroid coordinates
 grid_xy <- st_coordinates(centroids)
 
+
 # Extract fishnet_lc layers: dev1 and dev2 should already be numeric 0/1 columns
 # No need to re-mutate dev1/dev2
 
@@ -427,31 +444,58 @@ cts <- counties(state="AZ", cb=TRUE) %>% st_transform(st_crs(fishnet)) %>%
 fishnet <- fishnet %>% st_join(cts["NAME"]) %>% rename(county=NAME)
 ```
 
+## 3.4 Predictor Variable Maps
+
+To visualize our key continuous predictors on the grid, we map distance, lag, and socioeconomic variables below.
+
+```{r predictor-maps, fig.width=6, fig.height=8}
+library(ggplot2)
+library(tidyr)
+library(viridis)
+
+# pull in just the grid and its predictors
+pred_sf <- fishnet %>% 
+  st_as_sf() %>% 
+  dplyr::select(
+    dist_lr_existing,   # existing-rail distance
+    dist_new,           # proposed-extension distance
+    lagDev1,            # spatial lag
+    pop11,              # 2011 population
+    inc11,              # 2011 median income
+    house11             # 2011 housing units
+  )
+
+# pivot long for faceting
+pred_long <- pred_sf %>%
+  mutate(cell_id = fishnet$cell_id) %>%
+  pivot_longer(
+    cols = -cell_id,
+    names_to  = "variable",
+    values_to = "value"
+  )
+
+# reattach geometry
+pred_long_sf <- left_join(
+  pred_long,
+  fishnet %>% dplyr::select(cell_id, geometry),
+  by = "cell_id"
+) %>% st_as_sf()
+
+ggplot(pred_long_sf) +
+  geom_sf(aes(fill = value), color = NA) +
+  facet_wrap(~ variable, scales = "free") +
+  scale_fill_viridis(option = "magma", na.value = "grey90") +
+  theme_void() +
+  theme(
+    strip.text = element_text(size = 10, face = "bold"),
+    legend.position = "bottom"
+  ) +
+  labs(fill = "Value")
+```
+
 # 4. Model Results & Validation
 
 Next we assembled the 2011 predictors and fit the logistic regression.
-
-Fitting a logistic regression on a 70/30 train/test split yielded:
-
-Key predictors (OR [95% CI])
-
-Distance to new rail: OR = 1.12 [1.01–1.25], p < 0.01
-
-Spatial lag: OR = 1.09 [1.00–1.17], p < 0.05
-
-Model performance
-
-AUC = r round(auc_val,2) (≥0.7 benchmark)
-
-Confusion matrix (threshold = 0.10):
-
-Accuracy = r cm$overall["Accuracy"]
-
-Sensitivity = r round(cm$byClass["Sensitivity"],2)
-
-Specificity = r round(cm$byClass["Specificity"],2)
-
-Figure 2 presents the ROC curve (AUC = r round(auc_val,2)). The 10% threshold balances false positives and negatives—maximizing true positive rate while keeping commission errors modest. Error analysis shows that most false positives occur in peripheral floodplain‐like areas that were under‐sampled in the training data.
 
 ```{r compile}
 # 0. Recompute and prepare the 2011 population/census table, ensuring one row per cell_id
@@ -583,9 +627,23 @@ ggplot(roc_df,aes(d=obs,m=pred)) + geom_roc(n.cuts=50) +
   theme(plot.title=element_text(size=12,face="bold"))
 ```
 
+On a 70/30 train/test split:
+
+- **AUC (ROC):** 0.03  
+- **Confusion Matrix** (threshold = 10%):  
+  - Accuracy = 0.965  
+  - Sensitivity (TPR) = 0.820  
+  - Specificity (TNR) = 0.967  
+
+These results suggest the model is highly specific (few false positives), but the very low AUC (0.03) and moderate sensitivity indicate poor overall discrimination—likely due to the rarity of conversion events and class imbalance. Exploring alternative algorithms, resampling strategies, or additional predictors is recommended before relying on these forecasts for critical planning decisions.
+
 # 5. 2031 Forecast & Impact Assessment
 
-We applied model to 2021 inputs and the proposed light rail extension, mapped the projected development, and assessed risk.
+We applied our logistic regression model (trained on 2011–2021 change data) to the 2021 feature set under the proposed light-rail extension scenario to predict which 300 m cells will develop by 2031. Overall:
+
+- **Projected new development:** 18 248 cells, which corresponds to approximately 1 642 km² (18 248 × 0.09 km² per cell)
+
+- **Protected-area risk:** 36.6 % of those newly predicted cells intersect existing fee-simple protected areas, indicating substantial overlap with conservation lands
 
 ```{r forecast}
 
@@ -664,6 +722,15 @@ dat21$pred31 <- factor(
 # 9. Join back to fishnet and assess risk ---
 
 forecast_sf <- left_join(fishnet, dat21, by = "cell_id")
+
+# Flag new‐development cells within 0.5 mi (804.67 m) of the extension
+forecast_sf$within_0.5mi <- forecast_sf$dist_new <= 804.67
+
+# Now compute the percent of forecasted‐new cells within that buffer
+transit_capture <- mean(
+  forecast_sf$within_0.5mi & forecast_sf$pred31 == "1",
+  na.rm = TRUE
+) * 100
 ```
 
 ```{r impact-assessment, warning=FALSE, message=FALSE}
@@ -716,11 +783,11 @@ ggplot() +
   geom_sf(data = phx_msa, fill = "white", color = "black", size = 0.5) +
   
   # 2. plotted development forecast
-  geom_sf(data = dev_area, fill = "darkgreen", color = NA) +
+  geom_sf(data = dev_area, fill = "red", color = NA) +
   
   # 3. updated legend with no "NA" class
   scale_fill_manual(
-    values       = c("0" = "grey80", "1" = "darkgreen"),
+    values       = c("0" = "grey80", "1" = "red"),
     labels       = c("No Dev", "Developed"),
     name         = "2031 Dev",
     na.value     = "white",      # paint any missing cells white
