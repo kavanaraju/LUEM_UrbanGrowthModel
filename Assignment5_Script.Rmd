@@ -94,33 +94,20 @@ aggregateRaster <- function(inputRasterList, fishnet) {
 We first load the MSA boundary and NLCD land cover for 2011/2021, reclassify to “developed” (21–24), and visualize.
 
 ```{r load-boundary-nlcd}
-# Load Boundary for Phoenix
-phx_msa <- st_read("data/Phoenix_MSA/Phoenix_MSA.shp", quiet=TRUE) %>%
-  st_transform(26912)  # NAD83 / Arizona Central
-
-# Load NLCD land-cover rasters
-lc_2011 <- raster("data/Annual_NLCD_LndCov_2011_CU_C1V0.tif")  
+# Load and prepare MSA boundary and NLCD rasters
+phx_msa <- st_read("data/Phoenix_MSA/Phoenix_MSA.shp", quiet=TRUE) %>% st_transform(26912)
+lc_2011 <- raster("data/Annual_NLCD_LndCov_2011_CU_C1V0.tif")
 lc_2021 <- raster("data/Annual_NLCD_LndCov_2021_CU_C1V0.tif")
-
-# Transform the MSA boundary to match the raster CRS
 phx_msa_r <- st_transform(phx_msa, crs(lc_2011))
+lc_2011 <- mask(crop(lc_2011, phx_msa_r), phx_msa_r)
+lc_2021 <- mask(crop(lc_2021, phx_msa_r), phx_msa_r)
 
-# Crop and mask the country-wide rasters to the Phoenix MSA boundary
-lc_2011 <- crop(lc_2011, phx_msa_r)
-lc_2011 <- mask(lc_2011, phx_msa_r)
-
-lc_2021 <- crop(lc_2021, phx_msa_r)
-lc_2021 <- mask(lc_2021, phx_msa_r)
-
-# Reproject masked rasters back to study CRS
-lc_2011 <- projectRaster(lc_2011, crs = 26912)
-lc_2021 <- projectRaster(lc_2021, crs = 26912)
-
-# Reclassify developed classes (NLCD 21–24)
+# Reproject to study CRS and reclassify to binary developed
+lc_2011 <- projectRaster(lc_2011, crs=26912)
+lc_2021 <- projectRaster(lc_2021, crs=26912)
 rc <- matrix(c(0,12,0, 12,24,1, 24,Inf,0), ncol=3, byrow=TRUE)
-dev1 <- reclassify(lc1_rs, rc)
-dev2 <- reclassify(lc2_rs, rc)
-
+dev1 <- reclassify(lc_2011, rc)
+dev2 <- reclassify(lc_2021, rc)
 plot(dev2, main="2021 Developed Land (NLCD 21–24)")
 ```
 
@@ -137,19 +124,99 @@ Figure 1. Developed land footprint in 2021.
 We detected cells converting from undeveloped to developed.
 
 ```{r detect-change}
-# Resample to 300m (To capture finer details as we're analyzing the extension - TOD)
-lc1_rs <- aggregate(lc_2011, fact=10, fun="modal")
-lc2_rs <- aggregate(lc_2021, fact=10, fun="modal")
+# Resample to 300m, align, then detect change
+lc1_rs <- aggregate(dev1, fact=10, fun="modal")
+lc2_rs <- aggregate(dev2, fact=10, fun="modal")
 
-# Align origins, resolution, and extent
-lc2_rs <- resample(lc2_rs, lc1_rs, method="ngb")
+# Align resolution and extent
+dev2_rs_aligned <- resample(lc2_rs, lc1_rs, method="ngb")
 
 # Map algebra: 1 = change from undeveloped to developed
-dev_change <- dev1 + dev2
-# Keep only converted cells
+dev_change <- lc1_rs + dev2_rs_aligned
 dev_change[dev_change != 1] <- NA
-
 plot(dev_change, main="Converted to Developed (2011–2021)")
+```
+
+```{r make-binaries}
+#Before building the fishnet, we created binary rasters for each land-cover category from the resampled LC rasters.
+
+# 2011 binaries (300m)
+# Use the resampled developed raster lc1_rs rather than dev1 at original resolution
+dev1_rs <- reclassify(lc1_rs, matrix(c(0,12,0,12,24,1,24,Inf,0),3,byrow=TRUE))
+forest1 <- reclassify(lc1_rs, matrix(c(
+  0,40,0,
+  40,43,1,
+  43,Inf,0
+), 3, byrow=TRUE))
+farm1 <- reclassify(lc1_rs, matrix(c(
+  0,80,0,
+  80,82,1,
+  82,Inf,0
+), 3, byrow=TRUE))
+wet1  <- reclassify(lc1_rs, matrix(c(
+  0,89,0,
+  89,95,1,
+  95,Inf,0
+), 3, byrow=TRUE))
+water1 <- reclassify(lc1_rs, matrix(c(
+  0,10,0,
+  10,11,1,
+  11,Inf,0
+), 3, byrow=TRUE))
+# 'Other' = not dev1_rs, forest, farm, wet, water
+oth1 <- (1 - dev1_rs) * (1 - forest1) * (1 - farm1) * (1 - wet1) * (1 - water1)
+
+# 2021 binaries
+# Use the aligned developed raster dev2_rs_aligned
+# We have lc1_rs (2011) and dev2_rs_aligned (2021) at 300 m resolution
+
+# 2011 binaries from lc1_rs
+forest1 <- reclassify(lc1_rs, matrix(c(
+  0, 40, 0,
+  40, 43, 1,
+  43, Inf, 0
+), ncol=3, byrow=TRUE))
+farm1   <- reclassify(lc1_rs, matrix(c(
+  0, 80, 0,
+  80, 82, 1,
+  82, Inf, 0
+), ncol=3, byrow=TRUE))
+wet1    <- reclassify(lc1_rs, matrix(c(
+  0, 89, 0,
+  89, 95, 1,
+  95, Inf, 0
+), ncol=3, byrow=TRUE))
+water1  <- reclassify(lc1_rs, matrix(c(
+  0, 10, 0,
+  10, 11, 1,
+  11, Inf, 0
+), ncol=3, byrow=TRUE))
+# 'Other' = not developed & not any other category
+oth1 <- (1 - lc1_rs) * (1 - forest1) * (1 - farm1) * (1 - wet1) * (1 - water1)
+
+# 2021 binaries from dev2_rs_aligned
+forest2 <- reclassify(dev2_rs_aligned, matrix(c(
+  0, 40, 0,
+  40, 43, 1,
+  43, Inf, 0
+), ncol=3, byrow=TRUE))
+farm2   <- reclassify(dev2_rs_aligned, matrix(c(
+  0, 80, 0,
+  80, 82, 1,
+  82, Inf, 0
+), ncol=3, byrow=TRUE))
+wet2    <- reclassify(dev2_rs_aligned, matrix(c(
+  0, 89, 0,
+  89, 95, 1,
+  95, Inf, 0
+), ncol=3, byrow=TRUE))
+water2  <- reclassify(dev2_rs_aligned, matrix(c(
+  0, 10, 0,
+  10, 11, 1,
+  11, Inf, 0
+), ncol=3, byrow=TRUE))
+# 'Other' = not developed & not any other category
+oth2 <- (1 - dev2_rs_aligned) * (1 - forest2) * (1 - farm2) * (1 - wet2) * (1 - water2)
 ```
 
 # 4. Fishnet Grid & Raster Aggregation
@@ -157,9 +224,8 @@ plot(dev_change, main="Converted to Developed (2011–2021)")
 Next, we created a 300 m fishnet and aggregate land-cover flags.
 
 ```{r fishnet-raster-join}
-grid_res <- res(lc1_rs)[1] #cell size
-
-# 1. Build the full grid over the MSA bounding box only
+# 0. Build the 300 m fishnet grid
+grid_res <- res(lc1_rs)[1]
 bbox      <- st_bbox(phx_msa)
 grid_full <- st_make_grid(
   phx_msa,
@@ -168,99 +234,79 @@ grid_full <- st_make_grid(
   offset   = c(bbox$xmin, bbox$ymin),
   n        = c(
     ceiling((bbox$xmax - bbox$xmin) / grid_res),
-    ceiling((bbox$ymax - bbox$ymin) / grid_res)))
+    ceiling((bbox$ymax - bbox$ymin) / grid_res)
+  )
+)
 
-# 2. Convert to sf
+# Convert to sf and filter cells whose centroids lie inside the MSA
 grid_sf   <- st_sf(grid = grid_full)
-
-# 3. Compute centroids once (cheap)
 centroids <- st_centroid(grid_sf)
-
-# 4. Keep only cells whose centroid lies _inside_ the MSA
 inside    <- st_within(centroids, phx_msa, sparse = FALSE)[,1]
-fishnet   <- grid_sf[inside, ]
+fishnet   <- grid_sf[inside, ] %>% mutate(cell_id = row_number())
 
-# 5. Assign unique IDs
-fishnet <- fishnet %>% mutate(cell_id = row_number())
+# 1. Convert the change raster into point features
+pts_change <- rasterToPoints(dev_change) %>%
+  as.data.frame() %>%
+  st_as_sf(coords = c("x","y"), crs = st_crs(fishnet))
 
-# Convert the change raster to points
-pts_change <- rasterToPoints(dev_change) %>% 
-  as.data.frame() %>% 
-  st_as_sf(coords = c('x','y'), crs = st_crs(fishnet))
+# 2. Count how many change‐points fall in each cell (using st_intersects)
+counts <- lengths(st_intersects(fishnet, pts_change))
+# counts is an integer vector, in the same order as fishnet
 
-# Aggregate change points to fishnet grid
-fishnet <- aggregate(pts_change, fishnet, FUN = sum) %>%
-  mutate(development_change = factor(ifelse(layer > 0, 1, 0))) %>%
-  dplyr::select(-layer)
+# 3. Add that as a new column on fishnet
+fishnet$change_count <- counts
+fishnet$development_change <- factor(ifelse(fishnet$change_count > 0, 1, 0))
 
-
-#Aggregating Land Cover Categories
-
-# 0. Ensure 'cell_id' exists on fishnet
-if (!"cell_id" %in% names(fishnet)) {
-  fishnet <- fishnet %>% mutate(cell_id = row_number())
-}
-
-# 1. Convert fishnet sf → SpatVector
+# 2. Convert fishnet sf → SpatVector for zonal operations
 sv <- terra::vect(fishnet)
 
 # ---- 2011 land-cover categories ----
-
-# 2. Build SpatRaster stack of your 2011 binaries
-# collect 2011 binaries into a list
+# Build RasterStack of binaries at 300 m
 rasters1 <- list(
-  dev1    = dev1,
+  dev1    = lc1_rs,
   forest1 = forest1,
   farm1   = farm1,
   wet1    = wet1,
   oth1    = oth1,
   water1  = water1
 )
+stack1 <- raster::stack(rasters1)
+s1      <- terra::rast(stack1)
 
-stack1 <- raster::stack(rasters1)   # RasterStack of dev1, forest1, etc.
-s1      <- terra::rast(stack1)      # now a SpatRaster; names already correct
+# Rasterize cell_id zones onto the same grid
+zoneR   <- terra::rasterize(sv, s1[[1]], field = "cell_id")
 
-# 3. Rasterize zones (cell_id) onto the same grid
-template_rast <- s1[[1]]  
-zoneR         <- terra::rasterize(sv, template_rast, field = "cell_id")
-
-# 4. Zonal‐sum all layers in one C‐level call
+# Zonal sum to count presence of each category
 counts1 <- terra::zonal(s1, zoneR, fun = "sum", na.rm = TRUE)
-
-# 5. Convert to data.frame, join back, and flag >0 → 1/0
-df1 <- as.data.frame(counts1)
+df1     <- as.data.frame(counts1)
 colnames(df1)[1] <- "cell_id"
 
+# Join back and convert counts >0 to binary flags
 fishnet_lc1 <- fishnet %>%
   left_join(df1, by = "cell_id") %>%
   mutate(across(.cols = names(s1), ~ as.integer(.x > 0)))
 
 # ---- 2021 land-cover categories ----
-
-# 6. Build SpatRaster stack of your 2021 binaries
-# collect 2021 binaries into a list
 rasters2 <- list(
-  dev2    = dev2,
+  dev2    = dev2_rs_aligned,
   forest2 = forest2,
   farm2   = farm2,
   wet2    = wet2,
-  oth2    = oth2)
-
+  oth2    = oth2,
+  water2  = water2
+)
 stack2 <- raster::stack(rasters2)
-s2      <- terra::rast(stack2)      # names carry over from rasters2
+s2      <- terra::rast(stack2)
 
-# 7. Zonal‐sum onto the same zoneR
 counts2 <- terra::zonal(s2, zoneR, fun = "sum", na.rm = TRUE)
-
-# 8. Convert, join, and flag >0 → 1/0
-df2 <- as.data.frame(counts2)
+df2     <- as.data.frame(counts2)
 colnames(df2)[1] <- "cell_id"
 
 fishnet_lc2 <- fishnet %>%
   left_join(df2, by = "cell_id") %>%
   mutate(across(.cols = names(s2), ~ as.integer(.x > 0)))
-
 ```
+
 
 # 5. Census & Infrastructure Predictors
 
@@ -654,6 +700,7 @@ ggplot() +
     legend.position = "right"
   )
 ```
+
 ```{r}
 #save.image(file = "data/my_workspace.RData")
 
@@ -662,11 +709,11 @@ ggplot() +
 
 # 8. Key Recommendations
 
-1. Establish 100 m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
+1. Establish 100m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
 
-2. Incentivize TOD infill through density bonuses and fast-track permitting within 0.5 mi of the new extension to align with projected +8 % population growth by 2031.
+2. Incentivize TOD infill through density bonuses and fast-track permitting within 0.5mi of the new extension to align with projected +8% population growth by 2031.
 
-3. Coordinate infrastructure timing with forecasted development areas to optimize station placement and minimize leapfrog sprawl. Establish 100 m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
+3. Coordinate infrastructure timing with forecasted development areas to optimize station placement and minimize leapfrog sprawl. Establish 100m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
 ---
 
 <small>Adapted from Houston Urban Growth Modeling example (Fichman et al.).</small>
