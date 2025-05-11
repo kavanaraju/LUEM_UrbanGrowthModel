@@ -92,7 +92,7 @@ aggregateRaster <- function(inputRasterList, fishnet) {
 
 # 2. Current Land-Cover & Predictor Exploration
 
-We first load the MSA boundary and NLCD land cover for 2011/2021, reclassify to “developed” (21–24), and visualize.
+We begin by mapping the 2021 footprint of developed land (NLCD classes 21–24) across the Phoenix–Mesa–Scottsdale MSA (Figure 1). Developed cover comprises high‐density urban cores in central Phoenix and lower‐density suburbs radiating outward.
 
 ```{r load-boundary-nlcd}
 # Load and prepare MSA boundary and NLCD rasters
