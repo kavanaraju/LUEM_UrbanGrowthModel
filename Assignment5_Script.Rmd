@@ -17,6 +17,7 @@ knitr:
     echo: true           
     warning: false  
     message: false
+    progress: false
 ---
 
 **To:** Joshua Bednarek  
@@ -502,6 +503,22 @@ model <- glm(
 )
 summary(model)
 
+# Tidy the model and compute odds ratios
+model_coefs <- tidy(model) %>%
+  mutate(
+    OR = exp(estimate),
+    OR_2.5 = exp(estimate - 1.96 * std.error),
+    OR_97.5 = exp(estimate + 1.96 * std.error)
+  ) %>%
+  select(term, estimate, std.error, statistic, p.value, OR, OR_2.5, OR_97.5)
+
+# Pretty table
+knitr::kable(
+  model_coefs,
+  digits = c(3, 3, 3, 2, 3, 3, 3, 3),
+  caption = "**Table 1.** Logistic Regression Coefficients and Odds Ratios (95% CI)"
+)
+
 # Predict on Test Set
 test$prob <- predict(model, test, type = "response")
 
@@ -516,32 +533,30 @@ cm <- caret::confusionMatrix(
   factor(test$development_change),
   positive = "1"
 )
-print(cm)
+auc_val <- roc_auc_vec(test$development_change,test$prob)
+
 ```
 
-Table 1. Model summary (see summary(model)).
-Table 2. Confusion matrix (threshold=0.10): Sensitivity=r cm$byClass["Sensitivity"], Specificity=r cm$byClass["Specificity"].
-Figure 2. ROC (AUC=r round(auc_val,2)).
 
-> - **Coefficients:** signs, significance, and e^(β) for interpretation  
-> - **Confusion matrix:** accuracy, sensitivity (TPR), specificity (TNR) at your chosen threshold  
-> - **AUC** from the ROC (should be ≥ 0.7 for a useful model)
+## Table 1. Model summary
 
-```{r plot-roc}
-# 14.5. ROC Curve & AUC
+
+## Table 2. Confusion Matrix (threshold = 10 %)
+
+```{r cm}
+knitr::kable(as.data.frame(cm$table), caption="**Table 1.** Confusion Matrix", digits=0)
+```
+
+## Figure 2. ROC Curve (AUC = r round(auc_val,2))
+
+```{r ros}
 library(plotROC)
-roc_df <- data.frame(
-  obs  = as.numeric(test$development_change),
-  pred = test$prob
-)
-ggplot(roc_df, aes(d = obs, m = pred)) +
-  geom_roc(n.cuts = 50) +
-  style_roc(theme = theme_minimal()) +
-  labs(title = "ROC Curve (Test Set)")
+roc_df <- data.frame(obs=as.numeric(test$development_change), pred=test$prob)
 
-library(yardstick)
-auc_val <- roc_auc_vec(test$development_change, test$prob)
-cat("Test‐set AUC =", round(auc_val, 3), "\n")
+ggplot(roc_df,aes(d=obs,m=pred)) + geom_roc(n.cuts=50) +
+  style_roc(theme=theme_minimal()) +
+  labs(title="Figure 2. ROC Curve") +
+  theme(plot.title=element_text(size=12,face="bold"))
 ```
 
 # 5. 2031 Forecast & Impact Assessment
@@ -626,9 +641,6 @@ dat21$pred31 <- factor(
 
 forecast_sf <- left_join(fishnet, dat21, by = "cell_id")
 ```
-> 1. **Map** of cells predicted to develop by 2031.  
-> 2. **Table** showing `% in floodplain` and `% in protected areas`.  
-> 3. **Narrative** tying these numbers to your three key recommendations.
 
 ```{r impact-assessment, warning=FALSE, message=FALSE}
 gdb_path <- "data/Protected Areas/PADUS4_1_StateAZ.gdb"
@@ -666,8 +678,9 @@ risk_sum <- forecast_sf %>%
     total_cells = n(),
     pct_prot    = mean(prot_risk) * 100
   )
-knitr::kable(risk_sum, digits = 1,
-             caption = "Percent of 2031‐Predicted Cells in Fee‐Simple Protected Areas")
+
+# risk_sum computed earlier
+knitr::kable(risk_sum, caption="**Table 2.** % of 2031‐Predicted Cells in Protected Areas")
 
 dev_area <- forecast_sf %>% 
   filter(pred31 == "1") %>% 
@@ -701,6 +714,8 @@ ggplot() +
     plot.subtitle = element_text(hjust = 0.5, size = 12),
     legend.position = "right"
   )
+
+
 ```
 
 ```{r}
@@ -708,6 +723,28 @@ ggplot() +
 
 #load("data/my_workspace.RData")
 ```
+
+## Key Findings
+
+```{r kf}
+# 1. Total new cells and area (km²)
+total_cells   <- sum(dat21$pred31 == "1")
+cell_area_m2  <- (res(lc1_rs)[1])^2
+area_km2      <- total_cells * cell_area_m2 / 1e6
+
+# 2. Protected-area risk %  
+pct_prot      <- risk_sum$pct_prot
+
+# 3. Transit capture within 0.5 mi (~804.67 m)
+new_cells       <- forecast_sf %>% filter(pred31 == "1")
+transit_capture <- mean(new_cells$dist_new <= 804.67) * 100
+```
+
+- **Projected new development**: `r total_cells` cells (~`r round(area_km2,1)` km²)  
+
+- **Protected‐area risk**: `r round(pct_prot,1)` % of new cells intersect protected areas  
+
+- **Transit capture**: `r round(transit_capture,1)` % of new cells lie within 0.5 mi of the extension 
 
 # 6. Planning Recommendations
 
