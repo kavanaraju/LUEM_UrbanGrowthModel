@@ -453,44 +453,37 @@ library(ggplot2)
 library(tidyr)
 library(viridis)
 
-# pull in just the grid and its predictors
-pred_sf <- fishnet %>% 
-  st_as_sf() %>% 
-  dplyr::select(
-    dist_lr_existing,   # existing-rail distance
-    dist_new,           # proposed-extension distance
-    lagDev1,            # spatial lag
-    pop11,              # 2011 population
-    inc11,              # 2011 median income
-    house11             # 2011 housing units
-  )
-
-# pivot long for faceting
-pred_long <- pred_sf %>%
+# 1. Pull out the 2021 pop/inc/house and attach cell_id
+pop21_df <- fishnet_pop21 %>%
+  st_drop_geometry() %>%
   mutate(cell_id = fishnet$cell_id) %>%
-  pivot_longer(
-    cols = -cell_id,
-    names_to  = "variable",
-    values_to = "value"
-  )
+  select(cell_id, pop21, inc21, house21)
 
-# reattach geometry
-pred_long_sf <- left_join(
-  pred_long,
-  fishnet %>% dplyr::select(cell_id, geometry),
-  by = "cell_id"
-) %>% st_as_sf()
+# 2. Join 2011 & 2021 socioeconomic and the infra/lag columns into fishnet
+fishnet_map <- fishnet %>%
+  left_join(pop11_df, by = "cell_id") %>%       # adds pop11, inc11, house11
+  left_join(pop21_df, by = "cell_id")           # adds pop21, inc21, house21
 
-ggplot(pred_long_sf) +
+# 3. Now it has dist_lr_existing, dist_new, lagDev1, pop11, inc11, house11, etc.
+#    Melt to long for mapping
+library(tidyr)
+fishnet_long <- fishnet_map %>%
+  select(cell_id, dist_lr_existing, dist_new, lagDev1, pop11, inc11, house11) %>%
+  pivot_longer(-cell_id, names_to = "variable", values_to = "value") %>%
+  left_join(fishnet_map %>% select(cell_id, geometry), by = "cell_id") %>%
+  st_as_sf()
+
+# 4. Plot a small faceted map of all six predictors
+ggplot(fishnet_long) +
   geom_sf(aes(fill = value), color = NA) +
   facet_wrap(~ variable, scales = "free") +
-  scale_fill_viridis(option = "magma", na.value = "grey90") +
+  scale_fill_viridis_c(option = "magma") +
   theme_void() +
   theme(
     strip.text = element_text(size = 10, face = "bold"),
     legend.position = "bottom"
   ) +
-  labs(fill = "Value")
+  labs(fill = NULL, title = "Predictor surfaces (2011 & 2021 variables)")
 ```
 
 # 4. Model Results & Validation
@@ -848,13 +841,9 @@ new_cells       <- forecast_sf %>% filter(pred31 == "1")
 transit_capture <- mean(new_cells$dist_new <= 804.67) * 100
 ```
 
-- **Projected new development**: `r total_cells` cells (~`r round(area_km2,1)` km²)  
-
-- **Protected‐area risk**: `r round(pct_prot,1)` % of new cells intersect protected areas  
-
-- **Transit capture**: `r round(transit_capture,1)` % of new cells lie within 0.5 mi of the extension 
-
 # 6. Planning Recommendations
+
+The Arizona Office of Economic Opportunity publishes population and employment projections which along with our findings can guide what kinds of planning recommendations can be made for Phoenix in the coming years. The Phoenix metro area is predicted to have 5,867,900 people by 2031, and by 2033 the city of Phoenix has been projected to have 1,095,553 jobs. Unfortunately, there are not year specific recommendations for employment in Phoenix, so 2033 was the closest year. Based on our findings in the analysis, most of the predicted development is still concentrated in the northern part of the Phoenix MSA. This makes sense considering the light rail system and the light rail extension are both there, and development will often spur other development. However, to avoid sprawl or leapfrog development, incentivizing infill development and higher density developments within 0.5 mi of the existing developed land is important. 
 
 1. Establish 100m green buffers around protected lands and enable transfer-of-development rights to steer density inward.
 
