@@ -104,6 +104,8 @@ aggregateRaster <- function(inputRasterList, fishnet) {
   }
   result
 }
+
+load("data/my_workspace.RData")
 ```
 
 # 2. Current Land-Cover & Predictor Exploration
@@ -453,37 +455,45 @@ library(ggplot2)
 library(tidyr)
 library(viridis)
 
-# 1. Pull out the 2021 pop/inc/house and attach cell_id
-pop21_df <- fishnet_pop21 %>%
-  st_drop_geometry() %>%
-  mutate(cell_id = fishnet$cell_id) %>%
-  select(cell_id, pop21, inc21, house21)
-
-# 2. Join 2011 & 2021 socioeconomic and the infra/lag columns into fishnet
+# 1. Join 2011 socioeconomic onto fishnet
 fishnet_map <- fishnet %>%
-  left_join(pop11_df, by = "cell_id") %>%       # adds pop11, inc11, house11
-  left_join(pop21_df, by = "cell_id")           # adds pop21, inc21, house21
+  st_join(
+    fishnet_pop11 %>% dplyr::select(pop11, inc11, house11),
+    join = st_within,
+    left = TRUE
+  ) %>%
+# 2. Join 2021 socioeconomic onto that
+  st_join(
+    fishnet_pop21 %>% dplyr::select(pop21, inc21, house21),
+    join = st_within,
+    left = TRUE
+  )
 
-# 3. Now it has dist_lr_existing, dist_new, lagDev1, pop11, inc11, house11, etc.
-#    Melt to long for mapping
-library(tidyr)
+# 3. Now fishnet_map has:
+#    dist_lr_existing, dist_new, lagDev1, pop11, inc11, house11, pop21, inc21, house21
+
+# 4. Pivot to long form for mapping
 fishnet_long <- fishnet_map %>%
-  select(cell_id, dist_lr_existing, dist_new, lagDev1, pop11, inc11, house11) %>%
-  pivot_longer(-cell_id, names_to = "variable", values_to = "value") %>%
-  left_join(fishnet_map %>% select(cell_id, geometry), by = "cell_id") %>%
-  st_as_sf()
+  select(cell_id,
+         dist_lr_existing, dist_new, lagDev1,
+         pop11, inc11, house11) %>%  # pick whichever variables you want to map
+  pivot_longer(
+    cols = -c(cell_id, geometry),
+    names_to  = "variable",
+    values_to = "value"
+  )
 
-# 4. Plot a small faceted map of all six predictors
+# 5. Plot faceted predictor maps
 ggplot(fishnet_long) +
   geom_sf(aes(fill = value), color = NA) +
   facet_wrap(~ variable, scales = "free") +
   scale_fill_viridis_c(option = "magma") +
   theme_void() +
   theme(
-    strip.text = element_text(size = 10, face = "bold"),
+    strip.text     = element_text(size = 10, face = "bold"),
     legend.position = "bottom"
   ) +
-  labs(fill = NULL, title = "Predictor surfaces (2011 & 2021 variables)")
+  labs(title = "Key Predictor Surfaces (2011 variables & infrastructure)")
 ```
 
 # 4. Model Results & Validation
@@ -642,7 +652,7 @@ These results suggest the model is highly specific (few false positives), but th
 
 ## Error analysis:
 
-- False positives concentrate on fringe cells (e.g., wash corridors) under-represented in training, leading to over-prediction.
+- False positives concentrate on fringe cells under-represented in training, leading to over-prediction.
 
 - False negatives occur in small infill pockets within dense suburbs, where our 300 m grid and coarse census smoothing obscure localized change.
 In future iterations, adding finer-scale zoning layers or stratified resampling could reduce these misclassifications.
@@ -823,22 +833,6 @@ ggplot() +
 #save.image(file = "data/my_workspace.RData")
 
 #load("data/my_workspace.RData")
-```
-
-## Key Findings
-
-```{r kf}
-# 1. Total new cells and area (km²)
-total_cells   <- sum(dat21$pred31 == "1")
-cell_area_m2  <- (res(lc1_rs)[1])^2
-area_km2      <- total_cells * cell_area_m2 / 1e6
-
-# 2. Protected-area risk %  
-pct_prot      <- risk_sum$pct_prot
-
-# 3. Transit capture within 0.5 mi (~804.67 m)
-new_cells       <- forecast_sf %>% filter(pred31 == "1")
-transit_capture <- mean(new_cells$dist_new <= 804.67) * 100
 ```
 
 # 6. Planning Recommendations
